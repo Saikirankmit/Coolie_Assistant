@@ -7,7 +7,7 @@ import {
   onAuthStateChanged,
   updateProfile,
 } from "firebase/auth";
-import { auth } from "@/lib/firebase";
+import { getFirebaseAuth } from "@/lib/firebase";
 
 interface AuthContextType {
   user: User | null;
@@ -24,7 +24,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
+    const authInstance = getFirebaseAuth();
+    if (!authInstance) {
+      console.warn("Firebase auth not initialized; authentication will be disabled until configured.");
+      setLoading(false);
+      return;
+    }
+
+    const unsubscribe = onAuthStateChanged(authInstance, (user) => {
       setUser(user);
       setLoading(false);
     });
@@ -34,7 +41,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signUp = async (email: string, password: string, displayName: string) => {
     try {
-      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      const authInstance = getFirebaseAuth();
+      if (!authInstance) throw new Error("Firebase auth not initialized");
+
+      const userCredential = await createUserWithEmailAndPassword(authInstance, email, password);
       await updateProfile(userCredential.user, { displayName });
       setUser(userCredential.user);
     } catch (error) {
@@ -45,7 +55,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signIn = async (email: string, password: string) => {
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      const authInstance = getFirebaseAuth();
+      if (!authInstance) throw new Error("Firebase auth not initialized");
+
+      await signInWithEmailAndPassword(authInstance, email, password);
     } catch (error) {
       console.error("Sign in error:", error);
       throw error;
@@ -54,7 +67,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = async () => {
     try {
-      await firebaseSignOut(auth);
+      const authInstance = getFirebaseAuth();
+      if (!authInstance) throw new Error("Firebase auth not initialized");
+
+      await firebaseSignOut(authInstance);
     } catch (error) {
       console.error("Sign out error:", error);
       throw error;
