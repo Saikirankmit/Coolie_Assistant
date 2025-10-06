@@ -1,17 +1,19 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import {
   User,
-  signInWithRedirect,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
   signOut as firebaseSignOut,
   onAuthStateChanged,
-  getRedirectResult,
+  updateProfile,
 } from "firebase/auth";
-import { auth, googleProvider } from "@/lib/firebase";
+import { auth } from "@/lib/firebase";
 
 interface AuthContextType {
   user: User | null;
   loading: boolean;
-  signInWithGoogle: () => Promise<void>;
+  signUp: (email: string, password: string, displayName: string) => Promise<void>;
+  signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -27,16 +29,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLoading(false);
     });
 
-    getRedirectResult(auth).catch((error) => {
-      console.error("Redirect error:", error);
-    });
-
     return unsubscribe;
   }, []);
 
-  const signInWithGoogle = async () => {
+  const signUp = async (email: string, password: string, displayName: string) => {
     try {
-      await signInWithRedirect(auth, googleProvider);
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      await updateProfile(userCredential.user, { displayName });
+      setUser(userCredential.user);
+    } catch (error) {
+      console.error("Sign up error:", error);
+      throw error;
+    }
+  };
+
+  const signIn = async (email: string, password: string) => {
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
     } catch (error) {
       console.error("Sign in error:", error);
       throw error;
@@ -53,7 +62,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, signInWithGoogle, signOut }}>
+    <AuthContext.Provider value={{ user, loading, signUp, signIn, signOut }}>
       {children}
     </AuthContext.Provider>
   );
