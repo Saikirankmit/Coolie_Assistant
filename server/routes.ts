@@ -11,5 +11,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   const httpServer = createServer(app);
 
+  // Proxy endpoint to forward messages to the configured n8n webhook
+  app.post("/api/webhook/proxy", async (req, res) => {
+    const webhookUrl = process.env.N8N_WEBHOOK_URL || process.env.VITE_N8N_WEBHOOK_URL || "http://localhost:5678/webhook-test/whatsapp-mcp";
+
+    try {
+      const forwarded = await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req.body),
+      });
+
+      const text = await forwarded.text();
+      res.status(forwarded.status).contentType(forwarded.headers.get("content-type") || "text/plain").send(text);
+    } catch (err: any) {
+      res.status(502).json({ message: "Failed to forward to n8n webhook", error: String(err) });
+    }
+  });
+
   return httpServer;
 }

@@ -7,7 +7,9 @@ import { useChat } from "@/contexts/ChatContext";
 import { Button } from "@/components/ui/button";
 import { Trash2 } from "lucide-react";
 
-const WEBHOOK_URL = import.meta.env.VITE_N8N_WEBHOOK_URL || "http://localhost:5678/webhook-test/whatsapp-mcp";
+// By default send webhook POSTs to our server proxy which forwards to n8n.
+// Override with VITE_CLIENT_WEBHOOK_URL if you want the client to call n8n directly.
+const WEBHOOK_URL = import.meta.env.VITE_CLIENT_WEBHOOK_URL || "/api/webhook/proxy";
 
 export default function Chat() {
   const { user } = useAuth();
@@ -35,24 +37,48 @@ export default function Chat() {
     setError(null);
 
     try {
+      const payload = {
+        message: content,
+        userId: user?.uid,
+        userName: user?.displayName,
+      };
+
+      console.debug("Sending webhook POST to", WEBHOOK_URL, "payload:", payload);
+
       const response = await fetch(WEBHOOK_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          message: content,
-          userId: user?.uid,
-          userName: user?.displayName,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        // try to read JSON or text body for more helpful error
+        let errorBody: string | undefined;
+        try {
+          const json = await response.json();
+          errorBody = JSON.stringify(json);
+        } catch (e) {
+          try {
+            errorBody = await response.text();
+          } catch (e) {
+            errorBody = undefined;
+          }
+        }
+
+        const message = `HTTP error! status: ${response.status}${errorBody ? ` - ${errorBody}` : ""}`;
+        throw new Error(message);
       }
 
-      const data = await response.json();
-      
+      // parse success response
+      let data: any;
+      try {
+        data = await response.json();
+      } catch (e) {
+        data = { message: await response.text() };
+      }
+
       const assistantMessage = {
         id: (Date.now() + 1).toString(),
         content: data.response || data.message || "I received your message!",
