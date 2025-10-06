@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { TaskCard } from "@/components/TaskCard";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -7,55 +7,55 @@ import type { Task } from "@shared/schema";
 
 export default function Tasks() {
   const [filter, setFilter] = useState<"all" | "gmail" | "whatsapp" | "reminder">("all");
-  
-  const [tasks, setTasks] = useState<Task[]>([
-    {
-      id: "1",
-      title: "Review project proposal from client",
-      description: "Check the attached documents and provide feedback by EOD",
-      type: "gmail",
-      priority: "high",
-      completed: false,
-      dueDate: new Date(Date.now() + 86400000),
-      createdAt: new Date(),
-    },
-    {
-      id: "2",
-      title: "Follow up with Sarah about meeting",
-      type: "whatsapp",
-      priority: "medium",
-      completed: false,
-      createdAt: new Date(),
-    },
-    {
-      id: "3",
-      title: "Team standup at 10 AM",
-      description: "Daily sync with the development team",
-      type: "reminder",
-      priority: "low",
-      completed: false,
-      dueDate: new Date(Date.now() + 3600000),
-      createdAt: new Date(),
-    },
-    {
-      id: "4",
-      title: "Submit monthly report",
-      description: "Compile data from last month",
-      type: "reminder",
-      priority: "low",
-      completed: true,
-      createdAt: new Date(Date.now() - 86400000),
-    },
-    {
-      id: "5",
-      title: "Reply to customer inquiry",
-      description: "Answer questions about the new features",
-      type: "gmail",
-      priority: "medium",
-      completed: false,
-      createdAt: new Date(),
-    },
-  ]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [userId] = useState<string>(() => {
+    // for demo purposes, generate or use a fixed user id
+    return (localStorage.getItem("userId") as string) || (() => { const id = crypto.randomUUID(); localStorage.setItem("userId", id); return id; })();
+  });
+
+  useEffect(() => {
+    // fetch reminders
+    fetch("/api/reminders").then((r) => r.json()).then((data) => {
+      const mapped = (data as any[]).map((d) => ({
+        id: d.id,
+        title: d.message.slice(0, 40) || "Reminder",
+        description: d.message,
+        type: d.type === "general" ? "reminder" : d.type,
+        priority: "low",
+        completed: d.status !== "pending",
+        dueDate: d.datetime ? new Date(d.datetime) : undefined,
+        createdAt: new Date(d.created_at || d.createdAt || Date.now()),
+      } as Task));
+      setTasks(mapped);
+    });
+
+    // SSE for general reminders
+    const sse = new EventSource(`/api/sse/${userId}`);
+    sse.addEventListener("reminder", (ev: any) => {
+      try {
+        const d = JSON.parse(ev.data);
+        const t: Task = {
+          id: d.id,
+          title: d.message.slice(0, 40),
+          description: d.message,
+          type: "reminder",
+          priority: "low",
+          completed: false,
+          dueDate: d.datetime ? new Date(d.datetime) : undefined,
+          createdAt: new Date(),
+        };
+        setTasks((prev) => [t, ...prev]);
+        // show browser notification
+        if (Notification.permission === "granted") new Notification("Reminder", { body: d.message });
+      } catch (e) {
+        console.error(e);
+      }
+    });
+
+    return () => {
+      sse.close();
+    };
+  }, [userId]);
 
   const handleToggle = (id: string) => {
     setTasks((prev) =>
@@ -63,10 +63,48 @@ export default function Tasks() {
         task.id === id ? { ...task, completed: !task.completed } : task
       )
     );
+    // persist
+    const task = tasks.find((t) => t.id === id);
+    if (task) {
+      const newStatus = task.completed ? 'pending' : 'sent';
+      fetch(`/api/reminders/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: newStatus }) }).catch(console.error);
+    }
   };
 
   const handleDelete = (id: string) => {
-    setTasks((prev) => prev.filter((task) => task.id !== id));
+    fetch(`/api/reminders/${id}`, { method: "DELETE" }).then(() => {
+      setTasks((prev) => prev.filter((task) => task.id !== id));
+    }).catch(() => {
+      setTasks((prev) => prev.filter((task) => task.id !== id));
+    });
+  };
+
+  const handleAdd = async () => {
+    const type = window.prompt('Reminder type (whatsapp|gmail|general)', 'general');
+    if (!type) return;
+    const message = window.prompt('Message');
+    if (!message) return;
+    const datetime = window.prompt('Datetime (ISO)', new Date(Date.now() + 60000).toISOString());
+    const payload: any = { user_id: userId, type, message, datetime };
+    if (type === 'whatsapp') payload.user_phone = window.prompt('Phone (E.164)', '+1');
+    if (type === 'gmail') { payload.user_email = window.prompt('Email'); payload.user_token = window.prompt('Token (encrypted)'); }
+    const res = await fetch('/api/reminders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await res.json();
+    if (res.ok) {
+      const t: Task = {
+        id: data.id,
+        title: data.message.slice(0, 40),
+        description: data.message,
+        type: data.type === 'general' ? 'reminder' : data.type,
+        priority: 'low',
+        completed: false,
+        dueDate: data.datetime ? new Date(data.datetime) : undefined,
+        createdAt: new Date(data.created_at || Date.now()),
+      };
+      setTasks((prev) => [t, ...prev]);
+    } else {
+      alert('Failed to create reminder: ' + (data.message || 'unknown'));
+    }
   };
 
   const filteredTasks = tasks.filter((task) => {
@@ -124,7 +162,7 @@ export default function Tasks() {
           </div>
           <Button 
             data-testid="button-add-task" 
-            onClick={() => console.log("Add task")}
+            onClick={() => handleAdd()}
             className="bg-gradient-to-r from-chart-3 to-chart-4 hover:shadow-lg hover:shadow-chart-3/30 transition-all duration-300 hover:scale-105"
           >
             <Plus className="h-4 w-4 mr-2" />

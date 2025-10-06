@@ -1,4 +1,13 @@
+import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
+
+// Global error handlers to capture unhandled promise rejections and exceptions
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled Rejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
+});
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 
@@ -37,7 +46,14 @@ app.use((req, res, next) => {
 });
 
 (async () => {
-  const server = await registerRoutes(app);
+  let server: any;
+  try {
+    server = await registerRoutes(app);
+  } catch (err) {
+    console.error("Error registering routes:", err);
+    // rethrow so the process fails loudly in dev
+    throw err;
+  }
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
