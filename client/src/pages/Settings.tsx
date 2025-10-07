@@ -1,4 +1,4 @@
-import { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -10,10 +10,140 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
 import { Camera, User, Bell, Globe, Shield, AlertTriangle } from "lucide-react";
 import type { UserPreferences } from "@shared/schema";
+// Textarea not needed for masked secrets; using Input (password) instead
 
 export default function Settings() {
-  const { user } = useAuth();
+  const { user, getIdToken } = useAuth();
   const { toast } = useToast();
+
+  // Gmail & WhatsApp credentials state
+  const [gmailCredentials, setGmailCredentials] = useState({
+    gmailApiKey: "",
+    gmailClientId: "",
+    gmailClientSecret: "",
+    gmailRefreshToken: "",
+  });
+  const [hasGmailCreds, setHasGmailCreds] = useState(false);
+
+  const [whatsappCredentials, setWhatsappCredentials] = useState({
+    whatsappApiKey: "",
+    whatsappPhoneNumberId: "",
+    whatsappBusinessAccountId: "",
+    whatsappAccessToken: "",
+  });
+  const [hasWhatsappCreds, setHasWhatsappCreds] = useState(false);
+
+  const [savingCreds, setSavingCreds] = useState(false);
+
+  useEffect(() => {
+    try {
+      const uid = user?.uid || localStorage.getItem('userId');
+      if (!uid) return;
+      setHasGmailCreds(localStorage.getItem(`has_gmail_${uid}`) === 'true');
+      setHasWhatsappCreds(localStorage.getItem(`has_whatsapp_${uid}`) === 'true');
+    } catch (e) {
+      // ignore
+    }
+  }, [user]);
+
+  const getAuthHeaders = async (): Promise<Record<string, string>> => {
+    try {
+      if (typeof getIdToken === 'function') {
+        const token = await getIdToken();
+        if (token) return { Authorization: `Bearer ${token}` };
+      }
+    } catch (e) {
+      // ignore
+    }
+    return {};
+  };
+
+  const saveCredentialFlag = (type: 'gmail' | 'whatsapp', uid: string) => {
+    try {
+      localStorage.setItem(`has_${type}_${uid}`, 'true');
+    } catch (e) {
+      // ignore
+    }
+  };
+
+  const N8N_BASE = (import.meta as any)?.env?.VITE_N8N_BASE_URL ?? '';
+  const ENDPOINTS = {
+    gmail: {
+      save: N8N_BASE ? `${N8N_BASE}/webhook/save-gmail-credentials` : '/api/external/save-gmail-credentials',
+      action: N8N_BASE ? `${N8N_BASE}/webhook/gmail-action` : '/api/external/gmail-action',
+    },
+    whatsapp: {
+      save: N8N_BASE ? `${N8N_BASE}/webhook/save-whatsapp-credentials` : '/api/external/save-whatsapp-credentials',
+      action: N8N_BASE ? `${N8N_BASE}/webhook/whatsapp-action` : '/api/external/whatsapp-action',
+    },
+  };
+
+  const postJson = async (url: string, body: any) => {
+    const authHeaders = await getAuthHeaders();
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (authHeaders.Authorization) headers.Authorization = authHeaders.Authorization;
+    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    const text = await res.text();
+    // Try parse JSON, but handle HTML/error pages gracefully
+    try {
+      const data = text ? JSON.parse(text) : {};
+      // include status for callers
+      return { httpStatus: res.status, ...data };
+    } catch (err) {
+      // Non-JSON response (often an HTML error page). Return structured error so callers can show it.
+      const snippet = text ? text.slice(0, 200) : "";
+      return {
+        httpStatus: res.status,
+        status: 'error',
+        error: `Expected JSON but received ${res.headers.get('content-type') || 'unknown'} (HTTP ${res.status})`,
+        body: snippet,
+      };
+    }
+  };
+
+  const handleSaveGmailCredentials = async (e?: any) => {
+    e?.preventDefault?.();
+    setSavingCreds(true);
+    try {
+      const uid = user?.uid || localStorage.getItem('userId');
+      if (!uid) throw new Error('No user id');
+      const res = await postJson(ENDPOINTS.gmail.save, { userId: uid, credentials: gmailCredentials });
+      if (res?.status === 'success') {
+        setHasGmailCreds(true);
+        saveCredentialFlag('gmail', uid);
+        toast({ title: 'Gmail saved', description: 'Gmail credentials saved successfully.' });
+        setGmailCredentials({ gmailApiKey: '', gmailClientId: '', gmailClientSecret: '', gmailRefreshToken: '' });
+      } else {
+        toast({ title: 'Failed', description: res?.error || 'Failed to save Gmail credentials', variant: 'destructive' });
+      }
+    } catch (err: any) {
+      toast({ title: 'Error', description: err?.message || String(err), variant: 'destructive' });
+    } finally {
+      setSavingCreds(false);
+    }
+  };
+
+  const handleSaveWhatsappCredentials = async (e?: any) => {
+    e?.preventDefault?.();
+    setSavingCreds(true);
+    try {
+      const uid = user?.uid || localStorage.getItem('userId');
+      if (!uid) throw new Error('No user id');
+      const res = await postJson(ENDPOINTS.whatsapp.save, { userId: uid, credentials: whatsappCredentials });
+      if (res?.status === 'success') {
+        setHasWhatsappCreds(true);
+        saveCredentialFlag('whatsapp', uid);
+        toast({ title: 'WhatsApp saved', description: 'WhatsApp credentials saved successfully.' });
+        setWhatsappCredentials({ whatsappApiKey: '', whatsappPhoneNumberId: '', whatsappBusinessAccountId: '', whatsappAccessToken: '' });
+      } else {
+        toast({ title: 'Failed', description: res?.error || 'Failed to save WhatsApp credentials', variant: 'destructive' });
+      }
+    } catch (err: any) {
+      toast({ title: 'Error', description: err?.message || String(err), variant: 'destructive' });
+    } finally {
+      setSavingCreds(false);
+    }
+  };
 
   const [preferences, setPreferences] = useState<UserPreferences>({
     theme: "system",
@@ -144,6 +274,90 @@ export default function Settings() {
                 Save Profile Changes
               </Button>
             </div>
+          </div>
+        </Card>
+
+        {/* Gmail Credentials Card */}
+        <Card className="p-8 backdrop-blur-xl bg-card/80 border-2 hover-elevate transition-all duration-500 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-150 relative overflow-hidden">
+          <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent rounded-lg -z-10" />
+          <div className="space-y-6">
+            <div className="flex items-center gap-4">
+              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-primary/20 to-primary/10 flex items-center justify-center">
+                <User className="h-5 w-5 text-primary" />
+              </div>
+              <h2 className="text-2xl font-bold">Gmail Integration</h2>
+            </div>
+
+            <form className="grid gap-3" onSubmit={handleSaveGmailCredentials}>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div>
+                  <Label htmlFor="gmailClientId">Client ID</Label>
+                  <Input id="gmailClientId" value={gmailCredentials.gmailClientId} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailClientId: e.target.value })} />
+                </div>
+                <div>
+                  <Label htmlFor="gmailClientSecret">Client Secret</Label>
+                  <Input id="gmailClientSecret" type="password" value={gmailCredentials.gmailClientSecret} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailClientSecret: e.target.value })} />
+                </div>
+              </div>
+
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div>
+                  <Label htmlFor="gmailRefreshToken">Refresh Token</Label>
+                  <Input id="gmailRefreshToken" type="password" value={gmailCredentials.gmailRefreshToken} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailRefreshToken: e.target.value })} />
+                </div>
+                <div>
+                  <Label htmlFor="gmailApiKey">API Key (optional)</Label>
+                  <Input id="gmailApiKey" type="password" value={gmailCredentials.gmailApiKey} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailApiKey: e.target.value })} />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between pt-2">
+                <div className="text-sm text-muted-foreground">Status: {hasGmailCreds ? <span className="text-green-600">Connected</span> : <span className="text-gray-500">Not connected</span>}</div>
+                <div className="flex gap-2">
+                  <Button type="submit" disabled={savingCreds} className="bg-gradient-to-r from-primary to-chart-2">Save Gmail Credentials</Button>
+                  <Button variant="ghost" onClick={() => setGmailCredentials({ gmailApiKey: '', gmailClientId: '', gmailClientSecret: '', gmailRefreshToken: '' })}>Clear</Button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </Card>
+
+        {/* WhatsApp Credentials Card */}
+        <Card className="p-8 backdrop-blur-xl bg-card/80 border-2 hover-elevate transition-all duration-500 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-250 relative overflow-hidden">
+          <div className="absolute inset-0 bg-gradient-to-br from-chart-3/5 to-transparent rounded-lg -z-10" />
+          <div className="space-y-6">
+            <div className="flex items-center gap-4">
+              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-chart-3/20 to-chart-3/10 flex items-center justify-center">
+                <Bell className="h-5 w-5 text-chart-3" />
+              </div>
+              <h2 className="text-2xl font-bold">WhatsApp Integration</h2>
+            </div>
+
+            <form className="grid gap-3" onSubmit={handleSaveWhatsappCredentials}>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div>
+                  <Label htmlFor="whatsappPhoneNumberId">Phone Number ID</Label>
+                  <Input id="whatsappPhoneNumberId" value={whatsappCredentials.whatsappPhoneNumberId} onChange={(e) => setWhatsappCredentials({ ...whatsappCredentials, whatsappPhoneNumberId: e.target.value })} />
+                </div>
+                <div>
+                  <Label htmlFor="whatsappBusinessAccountId">Business Account ID</Label>
+                  <Input id="whatsappBusinessAccountId" value={whatsappCredentials.whatsappBusinessAccountId} onChange={(e) => setWhatsappCredentials({ ...whatsappCredentials, whatsappBusinessAccountId: e.target.value })} />
+                </div>
+              </div>
+
+              <div>
+                <Label htmlFor="whatsappAccessToken">Access Token</Label>
+                <Input id="whatsappAccessToken" type="password" value={whatsappCredentials.whatsappAccessToken} onChange={(e) => setWhatsappCredentials({ ...whatsappCredentials, whatsappAccessToken: e.target.value })} />
+              </div>
+
+              <div className="flex items-center justify-between pt-2">
+                <div className="text-sm text-muted-foreground">Status: {hasWhatsappCreds ? <span className="text-green-600">Connected</span> : <span className="text-gray-500">Not connected</span>}</div>
+                <div className="flex gap-2">
+                  <Button type="submit" disabled={savingCreds} className="bg-gradient-to-r from-chart-3 to-chart-4">Save WhatsApp Credentials</Button>
+                  <Button variant="ghost" onClick={() => setWhatsappCredentials({ whatsappApiKey: '', whatsappPhoneNumberId: '', whatsappBusinessAccountId: '', whatsappAccessToken: '' })}>Clear</Button>
+                </div>
+              </div>
+            </form>
           </div>
         </Card>
 

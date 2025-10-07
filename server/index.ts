@@ -1,5 +1,20 @@
 import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
+import fs from 'fs';
+import path from 'path';
+import dotenv from 'dotenv';
+
+// Load server/.env (if present) into process.env early so modules that are imported
+// afterwards (which read process.env at module-evaluation time) will see these values.
+try {
+  const serverEnvPath = path.resolve(process.cwd(), 'server', '.env');
+  if (fs.existsSync(serverEnvPath)) {
+    dotenv.config({ path: serverEnvPath });
+    console.log('Loaded server/.env into process.env');
+  }
+} catch (err) {
+  console.warn('Could not load server/.env:', err);
+}
 
 // Global error handlers to capture unhandled promise rejections and exceptions
 process.on("unhandledRejection", (reason) => {
@@ -11,9 +26,7 @@ process.on("uncaughtException", (err) => {
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import admin from 'firebase-admin';
-import fs from 'fs';
-import path from 'path';
-import dotenv from 'dotenv';
+// fs, path, dotenv were already imported above for early server/.env loading
 
 function tryParseJson(raw: string) {
   try {

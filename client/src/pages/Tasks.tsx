@@ -212,6 +212,21 @@ export default function Tasks() {
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const handleSubmit = async () => {
+    // Prevent creating gmail/whatsapp tasks if credentials are not saved in Settings
+    const integrationType = formType === 'gmail' ? 'gmail' : formType === 'whatsapp' ? 'whatsapp' : null;
+    if (integrationType) {
+      try {
+        const uid = userId || localStorage.getItem('userId');
+        const flag = uid ? localStorage.getItem(`has_${integrationType}_${uid}`) : null;
+        if (flag !== 'true') {
+          setErrors({ ...errors, credentials: `Please add ${integrationType} credentials in Settings before creating ${integrationType} tasks.` });
+          toast({ title: 'Missing credentials', description: `Go to Settings and save your ${integrationType} credentials to enable ${integrationType} tasks.`, variant: 'destructive' });
+          return;
+        }
+      } catch (e) {
+        // ignore storage errors
+      }
+    }
     const newErrors: Record<string, string> = {};
     if (!formMessage) newErrors.message = 'Message is required';
     // validate datetime
@@ -366,6 +381,7 @@ export default function Tasks() {
                       <SelectItem value="gmail">Gmail</SelectItem>
                     </SelectContent>
                   </Select>
+                  {errors.credentials && <p className="text-sm text-destructive mt-2">{errors.credentials}</p>}
                 </div>
                 <div>
                   <Label>Message</Label>
@@ -395,7 +411,7 @@ export default function Tasks() {
 
               <AlertDialogFooter>
                 <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction onClick={handleSubmit} disabled={submitting}>{submitting ? 'Creating...' : 'Create'}</AlertDialogAction>
+                <AlertDialogAction onClick={handleSubmit} disabled={submitting || Boolean(errors.credentials)}>{submitting ? 'Creating...' : 'Create'}</AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>

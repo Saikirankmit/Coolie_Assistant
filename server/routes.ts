@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { reminders, type ReminderRow } from "./storage";
 import { getPreferences, upsertPreferences } from "./prefs";
+import { upsertUserCredentials } from './integrations';
 import { insertNotification, listNotifications } from './notifications';
 import admin from 'firebase-admin';
 import { randomUUID } from 'crypto';
@@ -113,6 +114,58 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ message: String(err) });
     }
   });
+
+  // Endpoints to save integration credentials (Gmail / WhatsApp)
+  app.post('/api/external/save-gmail-credentials', verifyFirebaseToken, async (req, res) => {
+    try {
+      const uid = req.uid!;
+      const body = req.body;
+      // minimal validation
+      if (!body || !body.credentials) return res.status(400).json({ status: 'error', error: 'credentials required' });
+      // Don't store raw client secret in public logs — server persists to Supabase
+      await upsertUserCredentials(uid, 'gmail', { client_id: body.credentials.gmailClientId, client_secret: body.credentials.gmailClientSecret, refresh_token: body.credentials.gmailRefreshToken, api_key: body.credentials.gmailApiKey });
+      return res.json({ status: 'success' });
+    } catch (err: any) {
+      console.error('save-gmail-credentials error', err?.stack || err);
+      const payload: any = { status: 'error', error: err?.message ?? String(err) };
+      if (err?.code) payload.code = err.code;
+      if (err?.details) payload.details = err.details;
+      // Return 200 with error payload to avoid browser-level 500; logs still contain details.
+      return res.json({ ...payload, httpStatus: 500 });
+    }
+  });
+
+  app.post('/api/external/save-whatsapp-credentials', verifyFirebaseToken, async (req, res) => {
+    try {
+      const uid = req.uid!;
+      const body = req.body;
+      if (!body || !body.credentials) return res.status(400).json({ status: 'error', error: 'credentials required' });
+      await upsertUserCredentials(uid, 'whatsapp', { api_key: body.credentials.whatsappApiKey, phone_number_id: body.credentials.whatsappPhoneNumberId, business_account_id: body.credentials.whatsappBusinessAccountId, access_token: body.credentials.whatsappAccessToken });
+      return res.json({ status: 'success' });
+    } catch (err: any) {
+      console.error('save-whatsapp-credentials error', err?.stack || err);
+      const payload: any = { status: 'error', error: err?.message ?? String(err) };
+      if (err?.code) payload.code = err.code;
+      if (err?.details) payload.details = err.details;
+      return res.json({ ...payload, httpStatus: 500 });
+    }
+  });
+
+  // DEBUG: unauthenticated save route (local-only). Enabled when DEBUG_NO_AUTH=1.
+  if (process.env.DEBUG_NO_AUTH === '1') {
+    app.post('/api/debug/save-credentials', async (req, res) => {
+      try {
+        const { userId, type, credentials } = req.body;
+        if (!userId || !type || !credentials) return res.status(400).json({ status: 'error', error: 'userId, type, credentials required' });
+        const { upsertUserCredentials } = await import('./integrations');
+        await upsertUserCredentials(userId, type, credentials);
+        return res.json({ status: 'success' });
+      } catch (err: any) {
+        console.error('DEBUG save-credentials error', err?.stack || err);
+        return res.status(500).json({ status: 'error', error: err?.message ?? String(err) });
+      }
+    });
+  }
 
   app.delete("/api/reminders/:id", verifyFirebaseToken, async (req, res) => {
     const id = req.params.id;
@@ -347,6 +400,26 @@ export async function registerPreferencesRoutes(app: Express) {
       res.json(rows);
     } catch (err: any) {
       console.error('GET /api/notifications error', err);
+      res.status(500).json({ message: err?.message ?? String(err) });
+    }
+  });
+
+  // Quick health check to ensure API routes are handled (useful when Vite dev server may serve index.html)
+  app.get('/api/ping', (req, res) => {
+    res.json({ ok: true, time: new Date().toISOString() });
+  });
+
+  // Integration status for current user (helps debug whether credentials exist)
+  app.get('/api/integrations/status', verifyFirebaseToken, async (req, res) => {
+    try {
+      const uid = req.uid!;
+      // lazy import to avoid cycles
+      const { getUserCredentials } = await import('./integrations');
+      const gmail = await getUserCredentials(uid, 'gmail');
+      const whatsapp = await getUserCredentials(uid, 'whatsapp');
+      res.json({ gmail: !!gmail, whatsapp: !!whatsapp });
+    } catch (err: any) {
+      console.error('GET /api/integrations/status error', err?.stack || err);
       res.status(500).json({ message: err?.message ?? String(err) });
     }
   });
