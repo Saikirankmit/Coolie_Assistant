@@ -1,7 +1,45 @@
-import type { Express } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { reminders, type ReminderRow } from "./storage";
+import { getPreferences, upsertPreferences } from "./prefs";
+import { insertNotification, listNotifications } from './notifications';
+import admin from 'firebase-admin';
+import { randomUUID } from 'crypto';
+
+// Temporary connect sessions for authenticated SSE setup
+const SSE_CONNECT_SESSIONS: Map<string, { uid: string; expiresAt: number }> = new Map();
+const SSE_CONNECT_TTL = 1000 * 60; // 60s
+
+// Express request augmentation: attach uid when verified
+declare module 'express-serve-static-core' {
+  interface Request {
+    uid?: string;
+  }
+}
+
+async function verifyFirebaseToken(req: Request, res: Response, next: NextFunction) {
+  let idToken: string | undefined;
+  const auth = req.headers.authorization;
+  if (auth && auth.startsWith('Bearer ')) {
+    idToken = auth.split(' ')[1];
+  } else if (req.query && typeof req.query.token === 'string') {
+    // allow token via query for EventSource (browser can't set Authorization header)
+    idToken = req.query.token as string;
+  }
+  if (!idToken) {
+    return res.status(401).json({ message: 'ID token missing' });
+  }
+  try {
+    if (!admin.apps.length) return res.status(500).json({ message: 'Firebase Admin not initialized' });
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    req.uid = decoded.uid;
+    next();
+  } catch (err: any) {
+    console.error('Token verification failed', err);
+    return res.status(401).json({ message: 'Invalid or expired ID token' });
+  }
+}
 
 const N8N_WHATSAPP = process.env.N8N_WHATSAPP_WEBHOOK || process.env.N8N_WEBHOOK_URL || "http://localhost:5678/webhook-test/whatsapp-mcp";
 const N8N_GMAIL = process.env.N8N_GMAIL_WEBHOOK || process.env.N8N_WEBHOOK_URL || "http://localhost:5678/webhook-test/gmail-mcp";
@@ -42,20 +80,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Reminders CRUD
-  app.get("/api/reminders", async (_req, res) => {
-    const list = await reminders.listAll();
-    res.json(list);
+  app.get("/api/reminders", verifyFirebaseToken, async (req, res) => {
+    const uid = req.uid!;
+    try {
+      const list = await (reminders as any).listByUser ? (reminders as any).listByUser(uid) : await reminders.listAll();
+      res.json(list);
+    } catch (err: any) {
+      res.status(500).json({ message: String(err) });
+    }
   });
 
-  app.post("/api/reminders", async (req, res) => {
+  app.post("/api/reminders", verifyFirebaseToken, async (req, res) => {
     try {
       const body = req.body;
       // require minimal fields
-      if (!body.user_id || !body.type || !body.datetime || !body.message) {
-        return res.status(400).json({ message: "user_id, type, datetime, message required" });
+      if (!body.type || !body.datetime || !body.message) {
+        return res.status(400).json({ message: "type, datetime, message required" });
       }
+      const user_id = req.uid || body.user_id;
+      if (!user_id) return res.status(400).json({ message: 'user_id not provided and no auth' });
       const r = await reminders.create({
-        user_id: body.user_id,
+        user_id,
         type: body.type,
         datetime: new Date(body.datetime).toISOString(),
         message: body.message,
@@ -69,17 +114,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.delete("/api/reminders/:id", async (req, res) => {
+  app.delete("/api/reminders/:id", verifyFirebaseToken, async (req, res) => {
     const id = req.params.id;
-    const ok = await reminders.delete(id);
-    res.json({ ok });
+    try {
+      const row = await reminders.get(id);
+      if (!row) return res.status(404).json({ message: 'not found' });
+      if (row.user_id !== req.uid) return res.status(403).json({ message: 'forbidden' });
+      const ok = await reminders.delete(id);
+      res.json({ ok });
+    } catch (err: any) {
+      res.status(500).json({ message: String(err) });
+    }
   });
 
   // Update reminder (partial)
-  app.patch('/api/reminders/:id', async (req, res) => {
+  app.patch('/api/reminders/:id', verifyFirebaseToken, async (req, res) => {
     const id = req.params.id;
     const body = req.body;
     try {
+      const row = await reminders.get(id);
+      if (!row) return res.status(404).json({ message: 'not found' });
+      if (row.user_id !== req.uid) return res.status(403).json({ message: 'forbidden' });
       const updates: any = {};
       if (body.status) updates.status = body.status;
       if (body.message) updates.message = body.message;
@@ -94,8 +149,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // SSE endpoint for general reminders
-  app.get("/api/sse/:userId", (req, res) => {
+  // Legacy SSE that accepts token in query (kept for backwards compatibility)
+  app.get("/api/sse/:userId", verifyFirebaseToken, (req, res) => {
     const userId = req.params.userId;
+    if (userId !== req.uid) return res.status(403).end();
     res.set({
       Connection: "keep-alive",
       "Cache-Control": "no-cache",
@@ -113,6 +170,43 @@ export async function registerRoutes(app: Express): Promise<Server> {
     });
   });
 
+  // New secure connect flow: client POSTs to /api/sse/connect with Authorization header (or x-dev-uid when DEV_AUTH_BYPASS=1)
+  // Server verifies token and returns a short-lived connectId. Client then opens EventSource to /api/sse/stream/:connectId
+  app.post('/api/sse/connect', verifyFirebaseToken, (req, res) => {
+    const uid = req.uid!;
+    const connectId = randomUUID();
+    SSE_CONNECT_SESSIONS.set(connectId, { uid, expiresAt: Date.now() + SSE_CONNECT_TTL });
+    res.json({ connectId, ttl: SSE_CONNECT_TTL });
+  });
+
+  // Stream endpoint: no auth header required (browser EventSource can't send headers). It looks up the connectId created above.
+  app.get('/api/sse/stream/:connectId', (req, res) => {
+    const connectId = req.params.connectId;
+    const session = SSE_CONNECT_SESSIONS.get(connectId);
+    if (!session || session.expiresAt < Date.now()) {
+      return res.status(404).json({ message: 'connectId not found or expired' });
+    }
+    // consume the session (one-time)
+    SSE_CONNECT_SESSIONS.delete(connectId);
+
+    const uid = session.uid;
+    res.set({
+      Connection: 'keep-alive',
+      'Cache-Control': 'no-cache',
+      'Content-Type': 'text/event-stream',
+    });
+    res.flushHeaders?.();
+
+    const set = SSE_CLIENTS.get(uid) ?? new Set();
+    set.add(res);
+    SSE_CLIENTS.set(uid, set);
+
+    req.on('close', () => {
+      set.delete(res);
+      if (set.size === 0) SSE_CLIENTS.delete(uid);
+    });
+  });
+
   // In-process poller (every 60s) to dispatch due reminders
   setInterval(async () => {
     try {
@@ -127,6 +221,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
               await reminders.markFailed(r.id);
             } else {
               await reminders.markSent(r.id);
+              // also push SSE to connected clients for this user (so active tab gets notified)
+              try {
+                const clients = SSE_CLIENTS.get(r.user_id);
+                const payloadEvent = { id: r.id, message: r.message, datetime: r.datetime, type: r.type };
+                if (clients && clients.size > 0) {
+                  for (const res of Array.from(clients)) {
+                    sendSSE(res, 'reminder', payloadEvent);
+                  }
+                  // persist notification
+                  try {
+                    await insertNotification({ reminder_id: r.id, user_id: r.user_id, message: r.message, type: r.type, delivered_at: new Date().toISOString() });
+                  } catch (err) {
+                    console.error('Failed to persist notification for whatsapp', err);
+                  }
+                }
+              } catch (err) {
+                console.error('Failed to send SSE for whatsapp reminder', err);
+              }
             }
           } else if (r.type === "gmail") {
             const payload = { email: r.user_email, token: r.user_token, message: r.message };
@@ -135,6 +247,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
               await reminders.markFailed(r.id);
             } else {
               await reminders.markSent(r.id);
+              try {
+                const clients = SSE_CLIENTS.get(r.user_id);
+                const payloadEvent = { id: r.id, message: r.message, datetime: r.datetime, type: r.type };
+                if (clients && clients.size > 0) {
+                  for (const res of Array.from(clients)) {
+                    sendSSE(res, 'reminder', payloadEvent);
+                  }
+                  try {
+                    await insertNotification({ reminder_id: r.id, user_id: r.user_id, message: r.message, type: r.type, delivered_at: new Date().toISOString() });
+                  } catch (err) {
+                    console.error('Failed to persist notification for gmail', err);
+                  }
+                }
+              } catch (err) {
+                console.error('Failed to send SSE for gmail reminder', err);
+              }
             }
           } else if (r.type === "general") {
             // push to SSE clients if connected
@@ -145,9 +273,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 sendSSE(res, "reminder", payload);
               }
               await reminders.markSent(r.id);
+              try {
+                await insertNotification({ reminder_id: r.id, user_id: r.user_id, message: r.message, type: r.type, delivered_at: new Date().toISOString() });
+              } catch (err) {
+                console.error('Failed to persist notification for general', err);
+              }
             } else {
               // no clients connected; mark sent anyway (or keep pending) — we'll mark sent
               await reminders.markSent(r.id);
+              try {
+                await insertNotification({ reminder_id: r.id, user_id: r.user_id, message: r.message, type: r.type, delivered_at: new Date().toISOString() });
+              } catch (err) {
+                console.error('Failed to persist notification for general (no clients)', err);
+              }
             }
           }
         } catch (err) {
@@ -161,4 +299,55 @@ export async function registerRoutes(app: Express): Promise<Server> {
   }, 60 * 1000);
 
   return httpServer;
+}
+
+// Preferences endpoints (outside registerRoutes so supabase client is ready)
+export async function registerPreferencesRoutes(app: Express) {
+  app.get('/api/preferences/:userId', verifyFirebaseToken, async (req, res) => {
+    try {
+      const paramUserId = req.params.userId;
+      let uid = req.uid as string | undefined;
+      if (!uid && process.env.DEV_AUTH_BYPASS === '1') {
+        // allow route param as uid in dev bypass mode
+        uid = paramUserId;
+      }
+      if (!uid) return res.status(403).json({ message: 'forbidden' });
+      if (paramUserId !== uid && process.env.DEV_AUTH_BYPASS !== '1') return res.status(403).json({ message: 'forbidden' });
+      const prefs = await getPreferences(uid);
+      res.json(prefs ?? {});
+    } catch (err: any) {
+      console.error('GET /api/preferences error', err);
+      res.status(500).json({ message: err?.message ?? String(err) });
+    }
+  });
+
+  app.put('/api/preferences/:userId', verifyFirebaseToken, async (req, res) => {
+    try {
+      const paramUserId = req.params.userId;
+      let uid = req.uid as string | undefined;
+      if (!uid && process.env.DEV_AUTH_BYPASS === '1') {
+        uid = paramUserId;
+      }
+      if (!uid) return res.status(403).json({ message: 'forbidden' });
+      if (paramUserId !== uid && process.env.DEV_AUTH_BYPASS !== '1') return res.status(403).json({ message: 'forbidden' });
+      const body = req.body;
+      const prefs = await upsertPreferences({ user_id: uid, tone: body.tone, response_length: body.responseLength, formality: body.formality, include_emojis: body.includeEmojis });
+      res.json(prefs);
+    } catch (err: any) {
+      console.error('PUT /api/preferences error', err);
+      res.status(500).json({ message: err?.message ?? String(err) });
+    }
+  });
+
+  // Notifications
+  app.get('/api/notifications', verifyFirebaseToken, async (req, res) => {
+    try {
+      const uid = req.uid!;
+      const rows = await listNotifications(uid);
+      res.json(rows);
+    } catch (err: any) {
+      console.error('GET /api/notifications error', err);
+      res.status(500).json({ message: err?.message ?? String(err) });
+    }
+  });
 }

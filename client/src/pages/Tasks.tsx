@@ -4,34 +4,102 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Plus, Mail, MessageCircle, AlertCircle, CheckCircle2 } from "lucide-react";
 import type { Task } from "@shared/schema";
+import { useAuth } from "@/contexts/AuthContext";
+import { useToast } from "@/hooks/use-toast";
+import { useNotification } from "@/contexts/NotificationContext";
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 
 export default function Tasks() {
   const [filter, setFilter] = useState<"all" | "gmail" | "whatsapp" | "reminder">("all");
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [userId] = useState<string>(() => {
-    // for demo purposes, generate or use a fixed user id
-    return (localStorage.getItem("userId") as string) || (() => { const id = crypto.randomUUID(); localStorage.setItem("userId", id); return id; })();
-  });
+  const { user, getIdToken } = useAuth();
+  const { toast } = useToast();
+  const { addNotification } = useNotification();
+  const [userId, setUserId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (user) setUserId(user.uid as string);
+  }, [user]);
 
   useEffect(() => {
     // fetch reminders
-    fetch("/api/reminders").then((r) => r.json()).then((data) => {
-      const mapped = (data as any[]).map((d) => ({
-        id: d.id,
-        title: d.message.slice(0, 40) || "Reminder",
-        description: d.message,
-        type: d.type === "general" ? "reminder" : d.type,
-        priority: "low",
-        completed: d.status !== "pending",
-        dueDate: d.datetime ? new Date(d.datetime) : undefined,
-        createdAt: new Date(d.created_at || d.createdAt || Date.now()),
-      } as Task));
-      setTasks(mapped);
-    });
+    (async () => {
+      try {
+        if (!getIdToken) return;
+        const token = await getIdToken();
+        if (!token) return;
+        const resp = await fetch('/api/reminders', { headers: { Authorization: `Bearer ${token}` } });
+        if (!resp.ok) {
+          const text = await resp.text().catch(() => '');
+          console.warn('/api/reminders failed', resp.status, text);
+          setTasks([]);
+          return;
+        }
+        const data = await resp.json().catch((e) => {
+          console.error('Failed to parse /api/reminders JSON', e);
+          return null;
+        });
+        if (!data) {
+          setTasks([]);
+          return;
+        }
+
+        const rows = Array.isArray(data) ? data : (Array.isArray((data as any).data) ? (data as any).data : []);
+        if (!Array.isArray(rows)) {
+          console.warn('Unexpected /api/reminders response shape', data);
+          setTasks([]);
+          return;
+        }
+
+        const mapped = rows.map((d: any) => ({
+          id: d.id,
+          title: (d.message || '').slice(0, 40) || 'Reminder',
+          description: d.message,
+          type: d.type === 'general' ? 'reminder' : d.type,
+          priority: 'low',
+          completed: d.status !== 'pending',
+          dueDate: d.datetime ? new Date(d.datetime) : undefined,
+          createdAt: new Date(d.created_at || d.createdAt || Date.now()),
+        } as Task));
+
+        // dedupe by id (in case of duplicates) and preserve ordering
+        const map = new Map<string, Task>();
+        for (const t of mapped) map.set(t.id, t);
+        setTasks(Array.from(map.values()));
+      } catch (err) {
+        console.error('Error fetching reminders', err);
+        setTasks([]);
+      }
+    })();
 
     // SSE for general reminders
-    const sse = new EventSource(`/api/sse/${userId}`);
-    sse.addEventListener("reminder", (ev: any) => {
+    let sse: EventSource | null = null;
+    (async () => {
+      if (!user) return;
+      const token = await getIdToken();
+      if (!token) return;
+      // request a short-lived connectId
+      try {
+        const resp = await fetch('/api/sse/connect', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+        if (!resp.ok) return;
+        const body = await resp.json();
+        const connectId = body.connectId;
+        sse = new EventSource(`/api/sse/stream/${connectId}`);
+        sse.addEventListener("reminder", (ev: any) => {
       try {
         const d = JSON.parse(ev.data);
         const t: Task = {
@@ -44,18 +112,39 @@ export default function Tasks() {
           dueDate: d.datetime ? new Date(d.datetime) : undefined,
           createdAt: new Date(),
         };
-        setTasks((prev) => [t, ...prev]);
+        setTasks((prev) => {
+          const map = new Map<string, Task>();
+          map.set(t.id, t);
+          for (const p of prev) map.set(p.id, p);
+          return Array.from(map.values());
+        });
         // show browser notification
         if (Notification.permission === "granted") new Notification("Reminder", { body: d.message });
+        // show in-app toast
+        toast({ title: 'Reminder', description: d.message });
+        // add to notification center
+        addNotification({ id: d.id, title: d.message.slice(0,40), description: d.message, type: d.type, completedAt: new Date() });
       } catch (e) {
         console.error(e);
       }
     });
+      }
+      catch (err) {
+        console.error('SSE setup failed', err);
+      }
+    })();
 
     return () => {
-      sse.close();
+      if (sse) sse.close();
     };
   }, [userId]);
+
+  // request notification permission on mount (if not granted)
+  useEffect(() => {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      Notification.requestPermission().then(() => {});
+    }
+  }, []);
 
   const handleToggle = (id: string) => {
     setTasks((prev) =>
@@ -68,42 +157,129 @@ export default function Tasks() {
     if (task) {
       const newStatus = task.completed ? 'pending' : 'sent';
       fetch(`/api/reminders/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: newStatus }) }).catch(console.error);
+      (async () => {
+        try {
+          const token = await getIdToken();
+          if (!token) return;
+          const newStatus = task.completed ? 'pending' : 'sent';
+          const resp = await fetch(`/api/reminders/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ status: newStatus }) });
+          if (resp.ok) {
+            toast({ title: 'Task updated', description: `Task ${task.title} marked ${newStatus === 'sent' ? 'complete' : 'pending'}` });
+            if (newStatus === 'sent') {
+              addNotification({ id: task.id, title: task.title, description: task.description, type: task.type, completedAt: new Date() });
+            }
+          }
+        } catch (err) {
+          console.error(err);
+        }
+      })();
     }
   };
 
   const handleDelete = (id: string) => {
-    fetch(`/api/reminders/${id}`, { method: "DELETE" }).then(() => {
-      setTasks((prev) => prev.filter((task) => task.id !== id));
-    }).catch(() => {
-      setTasks((prev) => prev.filter((task) => task.id !== id));
-    });
+    (async () => {
+      try {
+        const token = await getIdToken();
+        if (!token) return;
+        await fetch(`/api/reminders/${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setTasks((prev) => prev.filter((task) => task.id !== id));
+      }
+    })();
   };
 
   const handleAdd = async () => {
-    const type = window.prompt('Reminder type (whatsapp|gmail|general)', 'general');
-    if (!type) return;
-    const message = window.prompt('Message');
-    if (!message) return;
-    const datetime = window.prompt('Datetime (ISO)', new Date(Date.now() + 60000).toISOString());
-    const payload: any = { user_id: userId, type, message, datetime };
-    if (type === 'whatsapp') payload.user_phone = window.prompt('Phone (E.164)', '+1');
-    if (type === 'gmail') { payload.user_email = window.prompt('Email'); payload.user_token = window.prompt('Token (encrypted)'); }
-    const res = await fetch('/api/reminders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    const data = await res.json();
-    if (res.ok) {
-      const t: Task = {
-        id: data.id,
-        title: data.message.slice(0, 40),
-        description: data.message,
-        type: data.type === 'general' ? 'reminder' : data.type,
-        priority: 'low',
-        completed: false,
-        dueDate: data.datetime ? new Date(data.datetime) : undefined,
-        createdAt: new Date(data.created_at || Date.now()),
-      };
-      setTasks((prev) => [t, ...prev]);
-    } else {
-      alert('Failed to create reminder: ' + (data.message || 'unknown'));
+    // Open modal handled via component state
+  };
+
+  // --- Modal form state and submit handler ---
+  const [open, setOpen] = useState(false);
+  const [formType, setFormType] = useState<'general' | 'whatsapp' | 'gmail'>('general');
+  const [formMessage, setFormMessage] = useState('');
+  // Helper: format a Date to a value usable by <input type="datetime-local"> (YYYY-MM-DDTHH:mm)
+  const formatForDatetimeLocal = (d: Date) => {
+    const tzOffset = d.getTimezoneOffset();
+    const local = new Date(d.getTime() - tzOffset * 60000);
+    return local.toISOString().slice(0, 16); // drop seconds
+  };
+
+  const [formDatetime, setFormDatetime] = useState(() => formatForDatetimeLocal(new Date(Date.now() + 60000)));
+  const [formPhone, setFormPhone] = useState('');
+  const [formEmail, setFormEmail] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  const handleSubmit = async () => {
+    const newErrors: Record<string, string> = {};
+    if (!formMessage) newErrors.message = 'Message is required';
+    // validate datetime
+    const parsedDate = Date.parse(formDatetime);
+    if (Number.isNaN(parsedDate)) newErrors.datetime = 'Please provide a valid date/time';
+    // phone validation for E.164 (basic)
+    if (formType === 'whatsapp') {
+      const phoneRegex = /^\+[1-9]\d{7,14}$/;
+      if (!formPhone) newErrors.phone = 'Phone is required for WhatsApp reminders';
+      else if (!phoneRegex.test(formPhone)) newErrors.phone = 'Phone must be in E.164 format, e.g. +15551234567';
+    }
+    // gmail validation for gmail addresses only
+    if (formType === 'gmail') {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!formEmail) newErrors.email = 'Email is required for Gmail reminders';
+      else if (!emailRegex.test(formEmail)) newErrors.email = 'Please provide a valid email address';
+      else if (!formEmail.toLowerCase().endsWith('@gmail.com') && !formEmail.toLowerCase().endsWith('@googlemail.com')) {
+        newErrors.email = 'Please provide a Gmail address (gmail.com)';
+      }
+    }
+
+    if (Object.keys(newErrors).length > 0) {
+      setErrors(newErrors);
+      return;
+    }
+    setErrors({});
+    setSubmitting(true);
+    try {
+  // formDatetime is in local 'YYYY-MM-DDTHH:mm' format; parse as local and convert to ISO UTC
+  const localDate = new Date(formDatetime);
+  const payload: any = { user_id: userId, type: formType, message: formMessage, datetime: localDate.toISOString() };
+      if (formType === 'whatsapp') payload.user_phone = formPhone;
+      if (formType === 'gmail') { payload.user_email = formEmail; }
+      const token = await getIdToken();
+      const headers: any = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch('/api/reminders', { method: 'POST', headers, body: JSON.stringify(payload) });
+      const data = await res.json();
+      if (res.ok) {
+        const t: Task = {
+          id: data.id,
+          title: data.message.slice(0, 40),
+          description: data.message,
+          type: data.type === 'general' ? 'reminder' : data.type,
+          priority: 'low',
+          completed: false,
+          dueDate: data.datetime ? new Date(data.datetime) : undefined,
+          createdAt: new Date(data.created_at || Date.now()),
+        };
+        setTasks((prev) => {
+          const map = new Map<string, Task>();
+          map.set(t.id, t);
+          for (const p of prev) map.set(p.id, p);
+          return Array.from(map.values());
+        });
+        setOpen(false);
+        // reset
+        setFormMessage('');
+        setFormPhone('');
+        setFormEmail('');
+      } else {
+        alert('Failed to create reminder: ' + (data.message || 'unknown'));
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Failed to create reminder');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -160,14 +336,69 @@ export default function Tasks() {
               Manage your Gmail, WhatsApp, and reminder tasks
             </p>
           </div>
-          <Button 
-            data-testid="button-add-task" 
-            onClick={() => handleAdd()}
-            className="bg-gradient-to-r from-chart-3 to-chart-4 hover:shadow-lg hover:shadow-chart-3/30 transition-all duration-300 hover:scale-105"
-          >
-            <Plus className="h-4 w-4 mr-2" />
-            Add Task
-          </Button>
+          <AlertDialog open={open} onOpenChange={setOpen}>
+            <AlertDialogTrigger asChild>
+              <Button 
+                data-testid="button-add-task" 
+                className="bg-gradient-to-r from-chart-3 to-chart-4 hover:shadow-lg hover:shadow-chart-3/30 transition-all duration-300 hover:scale-105"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Add Task
+              </Button>
+            </AlertDialogTrigger>
+
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Create a Task</AlertDialogTitle>
+                <AlertDialogDescription>
+                  Create a Gmail, WhatsApp or general reminder task.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+
+              <div className="space-y-4">
+                <div>
+                  <Label>Type</Label>
+                  <Select onValueChange={(v) => setFormType(v as any)} value={formType}>
+                    <SelectTrigger className="w-full"><SelectValue placeholder="Select type" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="general">General</SelectItem>
+                      <SelectItem value="whatsapp">WhatsApp</SelectItem>
+                      <SelectItem value="gmail">Gmail</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label>Message</Label>
+                  <Textarea value={formMessage} onChange={(e) => setFormMessage(e.target.value)} />
+                  {errors.message && <p className="text-sm text-destructive mt-1">{errors.message}</p>}
+                </div>
+                <div>
+                  <Label>Datetime</Label>
+                  <Input type="datetime-local" value={formDatetime} onChange={(e) => setFormDatetime(e.target.value)} />
+                  {errors.datetime && <p className="text-sm text-destructive mt-1">{errors.datetime}</p>}
+                </div>
+                {formType === 'whatsapp' && (
+                  <div>
+                    <Label>Phone (E.164)</Label>
+                    <Input value={formPhone} onChange={(e) => setFormPhone(e.target.value)} placeholder="+15551234567" />
+                    {errors.phone && <p className="text-sm text-destructive mt-1">{errors.phone}</p>}
+                  </div>
+                )}
+                {formType === 'gmail' && (
+                  <div>
+                    <Label>Email</Label>
+                    <Input value={formEmail} onChange={(e) => setFormEmail(e.target.value)} placeholder="you@gmail.com" />
+                    {errors.email && <p className="text-sm text-destructive mt-1">{errors.email}</p>}
+                  </div>
+                )}
+              </div>
+
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={handleSubmit} disabled={submitting}>{submitting ? 'Creating...' : 'Create'}</AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-150">

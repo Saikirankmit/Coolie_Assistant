@@ -9,6 +9,8 @@ import { ThemeProvider } from "@/contexts/ThemeProvider";
 import { ChatProvider } from "@/contexts/ChatContext";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { AppSidebar } from "@/components/AppSidebar";
+import { NotificationProvider } from "@/contexts/NotificationContext";
+import { NotificationBell } from "@/components/NotificationBell";
 import Home from "@/pages/Home";
 import Login from "@/pages/Login";
 import Chat from "@/pages/Chat";
@@ -78,20 +80,23 @@ function AppContent() {
   }
 
   return (
-    <SidebarProvider style={style as React.CSSProperties}>
-      <div className="flex h-screen w-full">
-        <AppSidebar />
-        <div className="flex flex-col flex-1">
-          <header className="flex items-center justify-between gap-2 p-2 border-b">
-            <SidebarTrigger data-testid="button-sidebar-toggle" />
-            <ThemeToggle />
-          </header>
-          <main className="flex-1 overflow-hidden">
-            <Router />
-          </main>
+    <NotificationProvider>
+      <SidebarProvider style={style as React.CSSProperties}>
+        <div className="flex h-screen w-full">
+          <AppSidebar />
+          <div className="flex flex-col flex-1">
+            <header className="flex items-center justify-between gap-2 p-2 border-b">
+              <SidebarTrigger data-testid="button-sidebar-toggle" />
+              <NotificationBell />
+              <ThemeToggle />
+            </header>
+            <main className="flex-1 overflow-hidden">
+              <Router />
+            </main>
+          </div>
         </div>
-      </div>
-    </SidebarProvider>
+      </SidebarProvider>
+    </NotificationProvider>
   );
 }
 

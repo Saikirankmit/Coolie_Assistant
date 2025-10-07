@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -8,10 +8,27 @@ import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
 import { Sparkles, MessageCircle, Zap, Smile } from "lucide-react";
 import type { PersonalizationSettings } from "@shared/schema";
+import { useAuth } from "@/contexts/AuthContext";
 
 export default function Personalization() {
   const { toast } = useToast();
   
+  const { user, getIdToken } = useAuth();
+  const [userId, setUserId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('userId');
+    } catch (e) {
+      return null;
+    }
+  });
+
+  useEffect(() => {
+    if (user) {
+      setUserId(user.uid as string);
+      try { localStorage.setItem('userId', user.uid); } catch {}
+    }
+  }, [user]);
+
   const [settings, setSettings] = useState<PersonalizationSettings>({
     tone: "friendly",
     responseLength: "moderate",
@@ -19,12 +36,51 @@ export default function Personalization() {
     includeEmojis: true,
   });
 
-  const handleSave = () => {
-    console.log("Saving settings:", settings);
-    toast({
-      title: "Settings saved",
-      description: "Your personalization preferences have been updated.",
-    });
+  // load prefs
+  useEffect(() => {
+    (async () => {
+      if (!userId) return;
+      try {
+        // try to include token if available
+        const headers: any = {};
+        if (getIdToken) {
+          const token = await getIdToken();
+          if (token) headers.Authorization = `Bearer ${token}`;
+        }
+        const res = await fetch(`/api/preferences/${userId}`, { headers });
+        if (!res.ok) return; // don't overwrite settings if fetch failed
+        const data = await res.json();
+        // only update settings if server returned a non-empty object
+        if (data && Object.keys(data).length > 0) {
+          setSettings((prev) => ({
+            tone: data.tone ?? prev.tone,
+            responseLength: data.response_length ?? prev.responseLength,
+            formality: data.formality ?? prev.formality,
+            includeEmojis: typeof data.include_emojis === 'boolean' ? data.include_emojis : prev.includeEmojis,
+          }));
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    })();
+  }, [userId, getIdToken]);
+
+  const handleSave = async () => {
+    if (!userId || !getIdToken) return toast({ title: 'Not signed in', description: 'Please sign in to save preferences.' });
+    try {
+      const token = await getIdToken();
+      if (!token) return toast({ title: 'Not signed in', description: 'Please sign in to save preferences.' });
+      const res = await fetch(`/api/preferences/${userId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ tone: settings.tone, responseLength: settings.responseLength, formality: settings.formality, includeEmojis: settings.includeEmojis }) });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        console.error('Save failed', payload);
+        return toast({ title: 'Save failed', description: payload?.message || 'Could not save preferences.' });
+      }
+      toast({ title: 'Settings saved', description: 'Your personalization preferences have been updated.' });
+    } catch (err) {
+      console.error(err);
+      toast({ title: 'Save failed', description: 'Could not save preferences.' });
+    }
   };
 
   const getPreviewText = () => {

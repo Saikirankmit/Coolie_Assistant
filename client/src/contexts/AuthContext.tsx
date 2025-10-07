@@ -15,6 +15,7 @@ interface AuthContextType {
   signUp: (email: string, password: string, displayName: string) => Promise<void>;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  getIdToken: () => Promise<string | null>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -33,6 +34,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const unsubscribe = onAuthStateChanged(authInstance, (user) => {
       setUser(user);
+      try {
+        if (user) {
+          localStorage.setItem('userId', user.uid);
+        } else {
+          localStorage.removeItem('userId');
+        }
+      } catch (e) {
+        // ignore storage errors
+      }
       setLoading(false);
     });
 
@@ -50,6 +60,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (error) {
       console.error("Sign up error:", error);
       throw error;
+    }
+  };
+
+  const getIdToken = async () => {
+    const authInstance = getFirebaseAuth();
+    if (!authInstance) return null;
+    const current = authInstance.currentUser;
+    if (!current) return null;
+    try {
+      return await current.getIdToken();
+    } catch (err) {
+      console.error('Failed to get ID token', err);
+      return null;
     }
   };
 
@@ -78,7 +101,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, signUp, signIn, signOut }}>
+    <AuthContext.Provider value={{ user, loading, signUp, signIn, signOut, getIdToken }}>
       {children}
     </AuthContext.Provider>
   );

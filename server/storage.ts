@@ -90,6 +90,12 @@ export class RemindersStorage {
     return data as ReminderRow[];
   }
 
+  async listByUser(userId: string) {
+    const { data, error } = await supabase.from('reminders').select('*').eq('user_id', userId).order('datetime', { ascending: true });
+    if (error) throw error;
+    return data as ReminderRow[];
+  }
+
   async get(id: string) {
     const { data, error } = await supabase.from('reminders').select('*').eq('id', id).single();
     if (error) return undefined;
