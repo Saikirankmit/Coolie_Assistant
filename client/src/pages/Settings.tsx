@@ -24,39 +24,8 @@ export default function Settings() {
     gmailRefreshToken: "",
   });
   const [hasGmailCreds, setHasGmailCreds] = useState(false);
-
-  const [whatsappCredentials, setWhatsappCredentials] = useState({
-    whatsappApiKey: "",
-    whatsappPhoneNumberId: "",
-    whatsappBusinessAccountId: "",
-    whatsappAccessToken: "",
-  });
-  const [hasWhatsappCreds, setHasWhatsappCreds] = useState(false);
-
+  // removed WhatsApp connector state and UI
   const [savingCreds, setSavingCreds] = useState(false);
-
-  useEffect(() => {
-    try {
-      const uid = user?.uid || localStorage.getItem('userId');
-      if (!uid) return;
-      setHasGmailCreds(localStorage.getItem(`has_gmail_${uid}`) === 'true');
-      setHasWhatsappCreds(localStorage.getItem(`has_whatsapp_${uid}`) === 'true');
-    } catch (e) {
-      // ignore
-    }
-  }, [user]);
-
-  const getAuthHeaders = async (): Promise<Record<string, string>> => {
-    try {
-      if (typeof getIdToken === 'function') {
-        const token = await getIdToken();
-        if (token) return { Authorization: `Bearer ${token}` };
-      }
-    } catch (e) {
-      // ignore
-    }
-    return {};
-  };
 
   const saveCredentialFlag = (type: 'gmail' | 'whatsapp', uid: string) => {
     try {
@@ -72,33 +41,18 @@ export default function Settings() {
       save: N8N_BASE ? `${N8N_BASE}/webhook/save-gmail-credentials` : '/api/external/save-gmail-credentials',
       action: N8N_BASE ? `${N8N_BASE}/webhook/gmail-action` : '/api/external/gmail-action',
     },
-    whatsapp: {
-      save: N8N_BASE ? `${N8N_BASE}/webhook/save-whatsapp-credentials` : '/api/external/save-whatsapp-credentials',
-      action: N8N_BASE ? `${N8N_BASE}/webhook/whatsapp-action` : '/api/external/whatsapp-action',
-    },
   };
 
-  const postJson = async (url: string, body: any) => {
-    const authHeaders = await getAuthHeaders();
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (authHeaders.Authorization) headers.Authorization = authHeaders.Authorization;
-    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-    const text = await res.text();
-    // Try parse JSON, but handle HTML/error pages gracefully
+  const getAuthHeaders = async (): Promise<Record<string,string>> => {
     try {
-      const data = text ? JSON.parse(text) : {};
-      // include status for callers
-      return { httpStatus: res.status, ...data };
-    } catch (err) {
-      // Non-JSON response (often an HTML error page). Return structured error so callers can show it.
-      const snippet = text ? text.slice(0, 200) : "";
-      return {
-        httpStatus: res.status,
-        status: 'error',
-        error: `Expected JSON but received ${res.headers.get('content-type') || 'unknown'} (HTTP ${res.status})`,
-        body: snippet,
-      };
+      if (typeof getIdToken === 'function') {
+        const token = await getIdToken();
+        if (token) return { Authorization: `Bearer ${token}` };
+      }
+    } catch (e) {
+      // ignore
     }
+    return {};
   };
 
   const handleSaveGmailCredentials = async (e?: any) => {
@@ -112,7 +66,16 @@ export default function Settings() {
         setHasGmailCreds(true);
         saveCredentialFlag('gmail', uid);
         toast({ title: 'Gmail saved', description: 'Gmail credentials saved successfully.' });
-        setGmailCredentials({ gmailApiKey: '', gmailClientId: '', gmailClientSecret: '', gmailRefreshToken: '' });
+        // Keep inputs as-is to reassure user; do not clear after save
+        // refresh server status to ensure persistence is reflected after save
+        try {
+          const headers = await getAuthHeaders();
+          const chk = await fetch('/api/integrations/status', { headers });
+          const payload = await chk.json().catch(() => ({}));
+          if (chk.ok && payload) {
+            setHasGmailCreds(!!payload.gmail);
+          }
+        } catch (_) {}
       } else {
         toast({ title: 'Failed', description: res?.error || 'Failed to save Gmail credentials', variant: 'destructive' });
       }
@@ -123,27 +86,9 @@ export default function Settings() {
     }
   };
 
-  const handleSaveWhatsappCredentials = async (e?: any) => {
-    e?.preventDefault?.();
-    setSavingCreds(true);
-    try {
-      const uid = user?.uid || localStorage.getItem('userId');
-      if (!uid) throw new Error('No user id');
-      const res = await postJson(ENDPOINTS.whatsapp.save, { userId: uid, credentials: whatsappCredentials });
-      if (res?.status === 'success') {
-        setHasWhatsappCreds(true);
-        saveCredentialFlag('whatsapp', uid);
-        toast({ title: 'WhatsApp saved', description: 'WhatsApp credentials saved successfully.' });
-        setWhatsappCredentials({ whatsappApiKey: '', whatsappPhoneNumberId: '', whatsappBusinessAccountId: '', whatsappAccessToken: '' });
-      } else {
-        toast({ title: 'Failed', description: res?.error || 'Failed to save WhatsApp credentials', variant: 'destructive' });
-      }
-    } catch (err: any) {
-      toast({ title: 'Error', description: err?.message || String(err), variant: 'destructive' });
-    } finally {
-      setSavingCreds(false);
-    }
-  };
+  // WhatsApp credential handlers removed
+
+  // WhatsApp connector logic removed
 
   const [preferences, setPreferences] = useState<UserPreferences>({
     theme: "system",
@@ -277,6 +222,8 @@ export default function Settings() {
           </div>
         </Card>
 
+        {/* WhatsApp connector removed */}
+
         {/* Gmail Credentials Card */}
         <Card className="p-8 backdrop-blur-xl bg-card/80 border-2 hover-elevate transition-all duration-500 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-150 relative overflow-hidden">
           <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent rounded-lg -z-10" />
@@ -292,22 +239,22 @@ export default function Settings() {
               <div className="grid sm:grid-cols-2 gap-3">
                 <div>
                   <Label htmlFor="gmailClientId">Client ID</Label>
-                  <Input id="gmailClientId" value={gmailCredentials.gmailClientId} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailClientId: e.target.value })} />
+                  <Input id="gmailClientId" value={gmailCredentials.gmailClientId} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailClientId: e.target.value })} placeholder={hasGmailCreds ? 'Saved (hidden) — leave blank to keep' : ''} />
                 </div>
                 <div>
                   <Label htmlFor="gmailClientSecret">Client Secret</Label>
-                  <Input id="gmailClientSecret" type="password" value={gmailCredentials.gmailClientSecret} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailClientSecret: e.target.value })} />
+                  <Input id="gmailClientSecret" type="password" value={gmailCredentials.gmailClientSecret} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailClientSecret: e.target.value })} placeholder={hasGmailCreds ? 'Saved (hidden) — leave blank to keep' : ''} />
                 </div>
               </div>
 
               <div className="grid sm:grid-cols-2 gap-3">
                 <div>
                   <Label htmlFor="gmailRefreshToken">Refresh Token</Label>
-                  <Input id="gmailRefreshToken" type="password" value={gmailCredentials.gmailRefreshToken} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailRefreshToken: e.target.value })} />
+                  <Input id="gmailRefreshToken" type="password" value={gmailCredentials.gmailRefreshToken} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailRefreshToken: e.target.value })} placeholder={hasGmailCreds ? 'Saved (hidden) — leave blank to keep' : ''} />
                 </div>
                 <div>
                   <Label htmlFor="gmailApiKey">API Key (optional)</Label>
-                  <Input id="gmailApiKey" type="password" value={gmailCredentials.gmailApiKey} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailApiKey: e.target.value })} />
+                  <Input id="gmailApiKey" type="password" value={gmailCredentials.gmailApiKey} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailApiKey: e.target.value })} placeholder={hasGmailCreds ? 'Saved (hidden) — leave blank to keep' : ''} />
                 </div>
               </div>
 
@@ -316,50 +263,75 @@ export default function Settings() {
                 <div className="flex gap-2">
                   <Button type="submit" disabled={savingCreds} className="bg-gradient-to-r from-primary to-chart-2">Save Gmail Credentials</Button>
                   <Button variant="ghost" onClick={() => setGmailCredentials({ gmailApiKey: '', gmailClientId: '', gmailClientSecret: '', gmailRefreshToken: '' })}>Clear</Button>
+                  <Button variant="outline" onClick={async () => {
+                    try {
+                      const headers = await getAuthHeaders();
+                      const resp = await fetch('/api/oauth/google/start', { headers });
+                      const ct = resp.headers.get('content-type') || '';
+                      if (!resp.ok) {
+                        const body = await resp.text().catch(() => '');
+                        console.error('oauth start failed', resp.status, body);
+                        alert(`Failed to start Google OAuth (HTTP ${resp.status}). See console for details.`);
+                        return;
+                      }
+
+                      if (ct.includes('application/json')) {
+                        const json = await resp.json();
+                        if (json?.url) {
+                          window.location.href = json.url;
+                          return;
+                        }
+                        console.error('oauth start returned json without url', json);
+                        alert('Failed to start Google OAuth: missing URL in response');
+                        return;
+                      }
+
+                      // non-json response (likely an HTML error or index.html). Try a backend fallback (common when only Vite is running).
+                      const text = await resp.text().catch(() => '');
+                      console.error('oauth start returned non-json response (likely frontend dev server):', text.slice(0, 200));
+
+                      // Attempt to contact backend directly on port 5050 (dev default) as a fallback
+                      try {
+                        const headers = await getAuthHeaders();
+                        const backendOrigin = `${window.location.protocol}//${window.location.hostname}:5050`;
+                        const backendUrl = `${backendOrigin}/api/oauth/google/start`;
+                        const resp2 = await fetch(backendUrl, { headers });
+                        const ct2 = resp2.headers.get('content-type') || '';
+                        if (!resp2.ok) {
+                          const body2 = await resp2.text().catch(() => '');
+                          console.error('oauth start backend failed', resp2.status, body2);
+                          alert(`Failed to start Google OAuth (backend HTTP ${resp2.status}). See console.`);
+                          return;
+                        }
+                        if (ct2.includes('application/json')) {
+                          const json2 = await resp2.json();
+                          if (json2?.url) {
+                            window.location.href = json2.url;
+                            return;
+                          }
+                          console.error('oauth start backend returned json without url', json2);
+                          alert('Failed to start Google OAuth: backend returned missing URL');
+                          return;
+                        }
+                        const text2 = await resp2.text().catch(() => '');
+                        console.error('oauth start backend returned non-json response:', text2.slice(0, 200));
+                        alert('Failed to start Google OAuth: server returned unexpected response (see console)');
+                      } catch (err) {
+                        console.error('oauth start backend request failed', err);
+                        alert('Failed to reach backend at http://localhost:5050 - ensure you started the server with `npm run dev`. See console for details.');
+                      }
+                    } catch (e) {
+                      console.error('start oauth failed', e);
+                      alert('Failed to start Google OAuth (network error)');
+                    }
+                  }}>Connect Gmail</Button>
                 </div>
               </div>
             </form>
           </div>
         </Card>
 
-        {/* WhatsApp Credentials Card */}
-        <Card className="p-8 backdrop-blur-xl bg-card/80 border-2 hover-elevate transition-all duration-500 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-250 relative overflow-hidden">
-          <div className="absolute inset-0 bg-gradient-to-br from-chart-3/5 to-transparent rounded-lg -z-10" />
-          <div className="space-y-6">
-            <div className="flex items-center gap-4">
-              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-chart-3/20 to-chart-3/10 flex items-center justify-center">
-                <Bell className="h-5 w-5 text-chart-3" />
-              </div>
-              <h2 className="text-2xl font-bold">WhatsApp Integration</h2>
-            </div>
-
-            <form className="grid gap-3" onSubmit={handleSaveWhatsappCredentials}>
-              <div className="grid sm:grid-cols-2 gap-3">
-                <div>
-                  <Label htmlFor="whatsappPhoneNumberId">Phone Number ID</Label>
-                  <Input id="whatsappPhoneNumberId" value={whatsappCredentials.whatsappPhoneNumberId} onChange={(e) => setWhatsappCredentials({ ...whatsappCredentials, whatsappPhoneNumberId: e.target.value })} />
-                </div>
-                <div>
-                  <Label htmlFor="whatsappBusinessAccountId">Business Account ID</Label>
-                  <Input id="whatsappBusinessAccountId" value={whatsappCredentials.whatsappBusinessAccountId} onChange={(e) => setWhatsappCredentials({ ...whatsappCredentials, whatsappBusinessAccountId: e.target.value })} />
-                </div>
-              </div>
-
-              <div>
-                <Label htmlFor="whatsappAccessToken">Access Token</Label>
-                <Input id="whatsappAccessToken" type="password" value={whatsappCredentials.whatsappAccessToken} onChange={(e) => setWhatsappCredentials({ ...whatsappCredentials, whatsappAccessToken: e.target.value })} />
-              </div>
-
-              <div className="flex items-center justify-between pt-2">
-                <div className="text-sm text-muted-foreground">Status: {hasWhatsappCreds ? <span className="text-green-600">Connected</span> : <span className="text-gray-500">Not connected</span>}</div>
-                <div className="flex gap-2">
-                  <Button type="submit" disabled={savingCreds} className="bg-gradient-to-r from-chart-3 to-chart-4">Save WhatsApp Credentials</Button>
-                  <Button variant="ghost" onClick={() => setWhatsappCredentials({ whatsappApiKey: '', whatsappPhoneNumberId: '', whatsappBusinessAccountId: '', whatsappAccessToken: '' })}>Clear</Button>
-                </div>
-              </div>
-            </form>
-          </div>
-        </Card>
+        {/* WhatsApp credentials form removed */}
 
         <Card className="p-8 backdrop-blur-xl bg-card/80 border-2 hover-elevate transition-all duration-500 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-300 relative overflow-hidden">
           <div className="absolute inset-0 bg-gradient-to-br from-chart-3/5 to-transparent rounded-lg -z-10" />

@@ -12,6 +12,10 @@ import { randomUUID } from 'crypto';
 const SSE_CONNECT_SESSIONS: Map<string, { uid: string; expiresAt: number }> = new Map();
 const SSE_CONNECT_TTL = 1000 * 60; // 60s
 
+// OAuth connect sessions for Google (state -> uid)
+const OAUTH_SESSIONS: Map<string, { uid: string; expiresAt: number }> = new Map();
+const OAUTH_SESSION_TTL = 1000 * 60 * 15; // 15 minutes
+
 // Express request augmentation: attach uid when verified
 declare module 'express-serve-static-core' {
   interface Request {
@@ -77,6 +81,133 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(forwarded.status).contentType(forwarded.headers.get("content-type") || "text/plain").send(text);
     } catch (err: any) {
       res.status(502).json({ message: "Failed to forward to n8n webhook", error: String(err) });
+    }
+  });
+
+  // DEV: allow unauthenticated oauth start when DEBUG_NO_AUTH=1 for local testing
+  // This helps when the frontend dev server serves index.html for /api/* and
+  // the client can't include an ID token. Enable by setting DEBUG_NO_AUTH=1.
+  if (process.env.DEBUG_NO_AUTH === '1') {
+    app.get('/api/oauth/google/start', async (req, res) => {
+      try {
+        const uid = (req.query.uid as string) || process.env.DEV_AUTH_BYPASS_UID || 'debug-user';
+        const state = randomUUID();
+        OAUTH_SESSIONS.set(state, { uid, expiresAt: Date.now() + OAUTH_SESSION_TTL });
+
+    // allow using a Vite-prefixed env var for local dev convenience (public client id only)
+    const clientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
+    const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || `${process.env.APP_BASE_URL || 'http://localhost:5173'}/api/oauth/google/callback`;
+    if (!clientId) return res.status(500).json({ message: 'GOOGLE_CLIENT_ID not configured on server. Set GOOGLE_CLIENT_ID in server/.env (or VITE_GOOGLE_CLIENT_ID for local dev).' });
+
+        const scope = encodeURIComponent([
+          'https://www.googleapis.com/auth/gmail.readonly',
+          'https://www.googleapis.com/auth/gmail.send',
+          'https://www.googleapis.com/auth/gmail.modify',
+        ].join(' '));
+
+        const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${scope}&access_type=offline&prompt=consent&state=${encodeURIComponent(state)}`;
+        return res.json({ url });
+      } catch (err: any) {
+        console.error('oauth/google/start debug error', err);
+        return res.status(500).json({ message: String(err) });
+      }
+    });
+  }
+
+  // Start Google OAuth: creates a short-lived state and returns the Google auth URL
+  app.get('/api/oauth/google/start', verifyFirebaseToken, async (req, res) => {
+    try {
+      const uid = req.uid!;
+      const state = randomUUID();
+      OAUTH_SESSIONS.set(state, { uid, expiresAt: Date.now() + OAUTH_SESSION_TTL });
+
+    // allow a dev fallback to VITE_GOOGLE_CLIENT_ID so frontend-only dev setups can test the flow
+    const clientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
+    const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || `${process.env.APP_BASE_URL || 'http://localhost:5173'}/api/oauth/google/callback`;
+    if (!clientId) return res.status(500).json({ message: 'GOOGLE_CLIENT_ID not configured on server. Set GOOGLE_CLIENT_ID in server/.env (or VITE_GOOGLE_CLIENT_ID for local dev).' });
+
+      const scope = encodeURIComponent([
+        'https://www.googleapis.com/auth/gmail.readonly',
+        'https://www.googleapis.com/auth/gmail.send',
+        'https://www.googleapis.com/auth/gmail.modify',
+      ].join(' '));
+
+      const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${scope}&access_type=offline&prompt=consent&state=${encodeURIComponent(state)}`;
+      return res.json({ url });
+    } catch (err: any) {
+      console.error('oauth/google/start error', err);
+      return res.status(500).json({ message: String(err) });
+    }
+  });
+
+  // OAuth callback: Google will redirect here with code and state
+  app.get('/api/oauth/google/callback', async (req, res) => {
+    try {
+      const code = req.query.code as string | undefined;
+      const state = req.query.state as string | undefined;
+      if (!code || !state) return res.status(400).send('Missing code or state');
+
+      const session = OAUTH_SESSIONS.get(state);
+      if (!session || session.expiresAt < Date.now()) return res.status(400).send('Invalid or expired state');
+      // consume
+      OAUTH_SESSIONS.delete(state);
+
+      const uid = session.uid;
+
+      const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || `${process.env.APP_BASE_URL || 'http://localhost:5173'}/api/oauth/google/callback`;
+      const clientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
+      const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      console.error('Missing Google client credentials');
+      return res.status(500).send('Server not configured for Google OAuth. Ensure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are set in server/.env. For local testing you can set VITE_GOOGLE_CLIENT_ID for the client id, but the secret must be set as GOOGLE_CLIENT_SECRET on the server.');
+    }
+
+      // exchange code for tokens
+      const params = new URLSearchParams();
+      params.set('code', code);
+      params.set('client_id', clientId);
+      params.set('client_secret', clientSecret);
+      params.set('redirect_uri', redirectUri);
+      params.set('grant_type', 'authorization_code');
+
+      const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString(),
+      });
+
+      const tokenBody = await tokenResp.text();
+      let tokenJson: any = null;
+      try { tokenJson = tokenBody ? JSON.parse(tokenBody) : {}; } catch (e) { tokenJson = { raw: tokenBody }; }
+
+      if (!tokenResp.ok) {
+        console.error('Google token exchange failed', tokenResp.status, tokenBody);
+        return res.status(502).send('Failed to exchange code for tokens');
+      }
+
+      const { access_token, refresh_token, expires_in, id_token } = tokenJson;
+      const expiryIso = expires_in ? new Date(Date.now() + Number(expires_in) * 1000).toISOString() : null;
+
+      // persist credentials for user (uses upsertUserCredentials from integrations)
+      try {
+        await upsertUserCredentials(uid, 'gmail', {
+          gmail_client_id: clientId,
+          gmail_client_secret: clientSecret ? '[REDACTED]' : '',
+          gmail_access_token: access_token,
+          gmail_refresh_token: refresh_token,
+          token_expiry: expiryIso,
+        });
+      } catch (err: any) {
+        console.error('Failed to upsert Gmail credentials', err);
+        // continue to redirect user but log server error
+      }
+
+      // redirect user back to client settings page (informative)
+      const clientReturn = process.env.APP_BASE_URL || 'http://localhost:5173';
+      return res.redirect(`${clientReturn}/settings?connected=gmail`);
+    } catch (err: any) {
+      console.error('oauth/google/callback error', err);
+      return res.status(500).send('OAuth callback failed');
     }
   });
 

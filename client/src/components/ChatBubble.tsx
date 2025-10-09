@@ -46,6 +46,10 @@ export function ChatBubble({ message, userName, userAvatar }: ChatBubbleProps) {
           <span className="text-xs font-medium text-muted-foreground">
             {isUser ? userName : "Coolie"}
           </span>
+          {/* show model badge for assistant messages when available */}
+          {!isUser && (message as any).model && (
+            <span className="text-xs px-2 py-0.5 rounded bg-muted/10 text-muted-foreground border">{(message as any).model}</span>
+          )}
           <span className="text-xs text-muted-foreground/60" data-testid={`text-time-${message.id}`}>
             {time}
           </span>
@@ -64,9 +68,30 @@ export function ChatBubble({ message, userName, userAvatar }: ChatBubbleProps) {
           {!isUser && (
             <div className="absolute inset-0 bg-gradient-to-br from-chart-2/5 to-primary/5 opacity-50" />
           )}
-          <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words relative z-10">
-            {message.content}
-          </p>
+          <div className="relative z-10">
+            <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">
+              {message.content}
+            </p>
+            {message.attachments && message.attachments.length > 0 && (
+              <div className="mt-3 grid grid-cols-1 gap-2">
+                {message.attachments.map((a, i) => (
+                  <div key={i} className="flex items-center gap-3">
+                    {a.mime.startsWith('image/') ? (
+                      <img src={a.url} alt={a.name} className="h-24 w-24 object-cover rounded-md border" />
+                    ) : a.mime === 'application/pdf' ? (
+                      <a href={a.url} target="_blank" rel="noreferrer" className="text-sm underline">
+                        {a.name}
+                      </a>
+                    ) : (
+                      <a href={a.url} target="_blank" rel="noreferrer" className="text-sm underline">
+                        {a.name}
+                      </a>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

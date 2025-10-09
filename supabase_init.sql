@@ -33,3 +33,14 @@ create table if not exists public.user_preferences (
 );
 
 create index if not exists user_preferences_user_idx on public.user_preferences(user_id);
+
+-- Store per-user integration credentials (gmail/whatsapp)
+create table if not exists public.user_credentials (
+  user_id text not null,
+  type text not null check (type in ('gmail','whatsapp')),
+  data jsonb not null,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, type)
+);
+
+create index if not exists user_credentials_user_idx on public.user_credentials(user_id);

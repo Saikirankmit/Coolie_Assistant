@@ -22,7 +22,10 @@ export type ChatMessage = {
   content: string;
   role: "user" | "assistant";
   timestamp: Date;
-  attachments?: string[];
+  // attachments: array of objects with name, mime and data URL (base64) or remote URL
+  attachments?: { name: string; mime: string; url: string }[];
+  // optional model identifier that produced the assistant message
+  model?: string;
 };
 
 export type Task = {
