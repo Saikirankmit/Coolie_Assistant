@@ -1,19 +1,19 @@
--- Supabase migration: create user_credentials table
+-- Supabase migration: create user_credentials table (simpler schema)
+-- This version uses user_id as the single primary key (one row per user).
 
-create table if not exists user_credentials (
-  user_id text primary key,
+CREATE TABLE IF NOT EXISTS public.user_credentials (
+  user_id text PRIMARY KEY,
   gmail_client_id text,
   gmail_client_secret text,
   gmail_access_token text,
   gmail_refresh_token text,
   token_expiry timestamptz,
-  created_at timestamptz default now(),
-  updated_at timestamptz default now()
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now(),
+  data jsonb
 );
 
--- Ensure user_id references Firebase UID (string). If you're syncing users into a users table, add a foreign key.
--- alter table user_credentials add constraint fk_user foreign key (user_id) references users(id);
-
--- Example insert (replace values):
--- insert into user_credentials (user_id, gmail_client_id, gmail_client_secret, gmail_access_token, gmail_refresh_token, token_expiry)
--- values ('firebase-uid-123', 'your-client-id', 'redacted-secret', 'ya29.a0Af...', '1//0g...', now() + interval '1 hour');
+-- Notes:
+-- 1) This schema enforces at most one credentials row per user (user_id PK).
+-- 2) If you previously had multiple rows per user (e.g., different 'type' values),
+--    you'll need to deduplicate before applying the PK change (see migration steps).

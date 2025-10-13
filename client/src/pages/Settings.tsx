@@ -6,14 +6,16 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { getFirebaseStorage, getFirebaseAuth } from "@/lib/firebase";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
-import { Camera, User, Bell, Globe, Shield, AlertTriangle } from "lucide-react";
+import WhatsappConnect from "@/components/WhatsappConnect";
+import { Camera, User, Bell, Globe, Shield } from "lucide-react";
 import type { UserPreferences } from "@shared/schema";
 // Textarea not needed for masked secrets; using Input (password) instead
 
 export default function Settings() {
-  const { user, getIdToken } = useAuth();
+  const { user, getIdToken, signOut, loading: authLoading } = useAuth();
   const { toast } = useToast();
 
   // Gmail & WhatsApp credentials state
@@ -26,6 +28,9 @@ export default function Settings() {
   const [hasGmailCreds, setHasGmailCreds] = useState(false);
   // removed WhatsApp connector state and UI
   const [savingCreds, setSavingCreds] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   const saveCredentialFlag = (type: 'gmail' | 'whatsapp', uid: string) => {
     try {
@@ -55,14 +60,64 @@ export default function Settings() {
     return {};
   };
 
+  // On first mount: capture ?connected=gmail and persist to localStorage so refresh keeps state
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('connected') === 'gmail') {
+        setHasGmailCreds(true);
+        try { localStorage.setItem('has_gmail', 'true'); } catch (e) {}
+        toast({ title: 'Gmail connected', description: 'Your Gmail account was connected successfully.' });
+        // remove query param so UI doesn't show blanks later
+        params.delete('connected');
+        const cleaned = window.location.pathname + (params.toString() ? `?${params.toString()}` : '');
+        window.history.replaceState({}, '', cleaned);
+      }
+    } catch (e) {
+      // ignore
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // After auth state loads, verify with server whether Gmail credentials exist.
+  // If server call fails or user not logged in, fall back to localStorage flag.
+  useEffect(() => {
+    (async () => {
+      if (authLoading) return;
+      try {
+        const headers = await getAuthHeaders();
+        const resp = await fetch('/api/integrations/status', { headers });
+        if (resp.ok) {
+          const body = await resp.json().catch(() => ({}));
+          if (body && body.gmail) {
+            setHasGmailCreds(true);
+            try { localStorage.setItem('has_gmail', 'true'); } catch (e) {}
+            return;
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+      // fallback to localStorage if server check not available or returned false
+      try {
+        const flag = localStorage.getItem('has_gmail');
+        setHasGmailCreds(!!flag);
+      } catch (e) {
+        // ignore
+      }
+    })();
+  }, [authLoading]);
+
   const handleSaveGmailCredentials = async (e?: any) => {
     e?.preventDefault?.();
     setSavingCreds(true);
     try {
       const uid = user?.uid || localStorage.getItem('userId');
       if (!uid) throw new Error('No user id');
-      const res = await postJson(ENDPOINTS.gmail.save, { userId: uid, credentials: gmailCredentials });
-      if (res?.status === 'success') {
+  const headers = await getAuthHeaders();
+  const resp = await fetch(ENDPOINTS.gmail.save, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify({ userId: uid, credentials: gmailCredentials }) });
+  const res = await resp.json().catch(() => ({ status: resp.ok ? 'success' : 'error', error: resp.ok ? undefined : 'Save failed' }));
+  if (res?.status === 'success') {
         setHasGmailCreds(true);
         saveCredentialFlag('gmail', uid);
         toast({ title: 'Gmail saved', description: 'Gmail credentials saved successfully.' });
@@ -146,19 +201,94 @@ export default function Settings() {
               <div className="flex items-center gap-6 p-6 rounded-2xl bg-gradient-to-br from-primary/5 to-chart-2/5 border-2 border-primary/10">
                 <div className="relative group">
                   <Avatar className="h-24 w-24 border-4 border-background shadow-xl">
-                    <AvatarImage src={user?.photoURL || ""} alt={user?.displayName || ""} />
+                    <AvatarImage src={previewUrl ?? user?.photoURL ?? ""} alt={user?.displayName || ""} />
                     <AvatarFallback className="text-3xl bg-gradient-to-br from-primary to-chart-2 text-primary-foreground">
                       {user?.displayName?.charAt(0).toUpperCase() || "U"}
                     </AvatarFallback>
                   </Avatar>
-                  <Button
-                    size="icon"
-                    className="absolute -bottom-2 -right-2 h-10 w-10 rounded-full shadow-lg bg-gradient-to-br from-primary to-chart-2 hover:scale-110 transition-transform duration-300"
-                    onClick={() => console.log("Change avatar")}
-                    data-testid="button-change-avatar"
-                  >
-                    <Camera className="h-5 w-5" />
-                  </Button>
+                  <input
+                    id="avatar-input"
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={async (ev) => {
+                      const file = ev.target.files?.[0];
+                      if (!file) return;
+                      // validate size (max 5MB)
+                      if (file.size > 5 * 1024 * 1024) {
+                        toast({ title: 'Image too large', description: 'Please pick an image smaller than 5MB', variant: 'destructive' });
+                        return;
+                      }
+                      // show preview
+                      try {
+                        const url = URL.createObjectURL(file);
+                        setPreviewUrl(url);
+                      } catch (e) {
+                        // ignore
+                      }
+
+                      // upload to Firebase Storage
+                      try {
+                        const storage = getFirebaseStorage();
+                        const auth = getFirebaseAuth();
+                        if (!storage || !auth) throw new Error('Firebase not configured');
+                        const current = auth.currentUser;
+                        if (!current) throw new Error('Not authenticated');
+
+                        const ext = file.name.split('.').pop() || 'jpg';
+                        const path = `users/${current.uid}/avatar.${ext}`;
+                        const storageRef = (await import('firebase/storage')).ref(storage, path);
+
+                        setUploading(true);
+                        setUploadProgress(0);
+
+                        const uploadTask = (await import('firebase/storage')).uploadBytesResumable(storageRef, file);
+
+                        uploadTask.on('state_changed', (snapshot: any) => {
+                          if (!snapshot) return;
+                          const prog = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100);
+                          setUploadProgress(prog);
+                        }, (error: any) => {
+                          console.error('upload failed', error);
+                          toast({ title: 'Upload failed', description: String(error), variant: 'destructive' });
+                          setUploading(false);
+                          setUploadProgress(null);
+                        }, async () => {
+                          try {
+                            const url = await (await import('firebase/storage')).getDownloadURL(uploadTask.snapshot.ref);
+                            // update firebase user profile
+                            try {
+                              const { updateProfile } = await import('firebase/auth');
+                              await updateProfile(current, { photoURL: url });
+                            } catch (e) {
+                              console.error('updateProfile failed', e);
+                            }
+                            toast({ title: 'Avatar updated', description: 'Your profile photo was uploaded.' });
+                          } catch (e) {
+                            console.error('getDownloadURL failed', e);
+                            toast({ title: 'Upload failed', description: 'Could not get file URL', variant: 'destructive' });
+                          } finally {
+                            setUploading(false);
+                            setUploadProgress(null);
+                          }
+                        });
+                      } catch (err: any) {
+                        console.error('avatar upload error', err);
+                        toast({ title: 'Upload error', description: err?.message || String(err), variant: 'destructive' });
+                        setUploading(false);
+                        setUploadProgress(null);
+                      }
+                    }}
+                  />
+                  <label htmlFor="avatar-input">
+                    <Button
+                      size="icon"
+                      className="absolute -bottom-2 -right-2 h-10 w-10 rounded-full shadow-lg bg-gradient-to-br from-primary to-chart-2 hover:scale-110 transition-transform duration-300"
+                      data-testid="button-change-avatar"
+                    >
+                      <Camera className="h-5 w-5" />
+                    </Button>
+                  </label>
                 </div>
                 <div className="flex-1 space-y-2">
                   <p className="font-bold text-2xl" data-testid="text-display-name">{user?.displayName}</p>
@@ -235,103 +365,121 @@ export default function Settings() {
               <h2 className="text-2xl font-bold">Gmail Integration</h2>
             </div>
 
-            <form className="grid gap-3" onSubmit={handleSaveGmailCredentials}>
-              <div className="grid sm:grid-cols-2 gap-3">
-                <div>
-                  <Label htmlFor="gmailClientId">Client ID</Label>
-                  <Input id="gmailClientId" value={gmailCredentials.gmailClientId} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailClientId: e.target.value })} placeholder={hasGmailCreds ? 'Saved (hidden) — leave blank to keep' : ''} />
-                </div>
-                <div>
-                  <Label htmlFor="gmailClientSecret">Client Secret</Label>
-                  <Input id="gmailClientSecret" type="password" value={gmailCredentials.gmailClientSecret} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailClientSecret: e.target.value })} placeholder={hasGmailCreds ? 'Saved (hidden) — leave blank to keep' : ''} />
-                </div>
-              </div>
-
-              <div className="grid sm:grid-cols-2 gap-3">
-                <div>
-                  <Label htmlFor="gmailRefreshToken">Refresh Token</Label>
-                  <Input id="gmailRefreshToken" type="password" value={gmailCredentials.gmailRefreshToken} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailRefreshToken: e.target.value })} placeholder={hasGmailCreds ? 'Saved (hidden) — leave blank to keep' : ''} />
-                </div>
-                <div>
-                  <Label htmlFor="gmailApiKey">API Key (optional)</Label>
-                  <Input id="gmailApiKey" type="password" value={gmailCredentials.gmailApiKey} onChange={(e) => setGmailCredentials({ ...gmailCredentials, gmailApiKey: e.target.value })} placeholder={hasGmailCreds ? 'Saved (hidden) — leave blank to keep' : ''} />
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between pt-2">
-                <div className="text-sm text-muted-foreground">Status: {hasGmailCreds ? <span className="text-green-600">Connected</span> : <span className="text-gray-500">Not connected</span>}</div>
-                <div className="flex gap-2">
-                  <Button type="submit" disabled={savingCreds} className="bg-gradient-to-r from-primary to-chart-2">Save Gmail Credentials</Button>
-                  <Button variant="ghost" onClick={() => setGmailCredentials({ gmailApiKey: '', gmailClientId: '', gmailClientSecret: '', gmailRefreshToken: '' })}>Clear</Button>
-                  <Button variant="outline" onClick={async () => {
-                    try {
-                      const headers = await getAuthHeaders();
-                      const resp = await fetch('/api/oauth/google/start', { headers });
-                      const ct = resp.headers.get('content-type') || '';
-                      if (!resp.ok) {
-                        const body = await resp.text().catch(() => '');
-                        console.error('oauth start failed', resp.status, body);
-                        alert(`Failed to start Google OAuth (HTTP ${resp.status}). See console for details.`);
-                        return;
-                      }
-
-                      if (ct.includes('application/json')) {
-                        const json = await resp.json();
-                        if (json?.url) {
-                          window.location.href = json.url;
-                          return;
-                        }
-                        console.error('oauth start returned json without url', json);
-                        alert('Failed to start Google OAuth: missing URL in response');
-                        return;
-                      }
-
-                      // non-json response (likely an HTML error or index.html). Try a backend fallback (common when only Vite is running).
-                      const text = await resp.text().catch(() => '');
-                      console.error('oauth start returned non-json response (likely frontend dev server):', text.slice(0, 200));
-
-                      // Attempt to contact backend directly on port 5050 (dev default) as a fallback
+            {hasGmailCreds ? (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-lg font-semibold">Gmail Connected</div>
+                    <div className="text-sm text-muted-foreground">Your Gmail account is connected. Only one Gmail account can be connected at a time. When connected, the app can send and read messages on your behalf for reminders and automation.</div>
+                  </div>
+                  <div className="flex flex-col items-end gap-2">
+                    <div className="text-sm text-green-600 font-medium">Connected</div>
+                    <Button variant="ghost" onClick={async () => {
                       try {
                         const headers = await getAuthHeaders();
-                        const backendOrigin = `${window.location.protocol}//${window.location.hostname}:5050`;
-                        const backendUrl = `${backendOrigin}/api/oauth/google/start`;
-                        const resp2 = await fetch(backendUrl, { headers });
-                        const ct2 = resp2.headers.get('content-type') || '';
-                        if (!resp2.ok) {
-                          const body2 = await resp2.text().catch(() => '');
-                          console.error('oauth start backend failed', resp2.status, body2);
-                          alert(`Failed to start Google OAuth (backend HTTP ${resp2.status}). See console.`);
-                          return;
-                        }
-                        if (ct2.includes('application/json')) {
-                          const json2 = await resp2.json();
-                          if (json2?.url) {
-                            window.location.href = json2.url;
-                            return;
-                          }
-                          console.error('oauth start backend returned json without url', json2);
-                          alert('Failed to start Google OAuth: backend returned missing URL');
-                          return;
-                        }
-                        const text2 = await resp2.text().catch(() => '');
-                        console.error('oauth start backend returned non-json response:', text2.slice(0, 200));
-                        alert('Failed to start Google OAuth: server returned unexpected response (see console)');
-                      } catch (err) {
-                        console.error('oauth start backend request failed', err);
-                        alert('Failed to reach backend at http://localhost:5050 - ensure you started the server with `npm run dev`. See console for details.');
+                        const resp = await fetch('/api/external/save-gmail-credentials', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify({ credentials: null }) });
+                        // server returns 200 even on error payload; treat non-ok as error
+                        if (!resp.ok) throw new Error('Failed to disconnect');
+                        setHasGmailCreds(false);
+                        toast({ title: 'Disconnected', description: 'Gmail integration disconnected.' });
+                      } catch (err: any) {
+                        console.error('disconnect gmail failed', err);
+                        toast({ title: 'Failed', description: 'Could not disconnect Gmail', variant: 'destructive' });
                       }
-                    } catch (e) {
-                      console.error('start oauth failed', e);
-                      alert('Failed to start Google OAuth (network error)');
-                    }
-                  }}>Connect Gmail</Button>
+                    }}>Disconnect</Button>
+                  </div>
                 </div>
               </div>
-            </form>
+            ) : (
+              <div className="grid gap-3">
+                <div className="space-y-2">
+                  <p className="text-sm text-muted-foreground">When enabled, Coolie Assistant can manage your Gmail account to send reminders and perform email automations on your behalf. Only one Gmail account may be connected at a time.</p>
+                </div>
+
+                <div className="flex items-center justify-between pt-2">
+                  <div className="text-sm text-muted-foreground">Status: {hasGmailCreds ? <span className="text-green-600">Connected</span> : <span className="text-gray-500">Not connected</span>}</div>
+                  <div className="flex gap-2">
+                    <Button variant="outline" onClick={async () => {
+                      try {
+                        const headers = await getAuthHeaders();
+                        // If we're running in a dev/debug mode where the server accepts a uid query param,
+                        // append the current user's uid so the server won't fallback to a debug value.
+                        let startUrl = '/api/oauth/google/start';
+                        if (user?.uid) startUrl += `?uid=${encodeURIComponent(user.uid)}`;
+                        const resp = await fetch(startUrl, { headers });
+                        const ct = resp.headers.get('content-type') || '';
+                        if (!resp.ok) {
+                          const body = await resp.text().catch(() => '');
+                          console.error('oauth start failed', resp.status, body);
+                          alert(`Failed to start Google OAuth (HTTP ${resp.status}). See console for details.`);
+                          return;
+                        }
+
+                        if (ct.includes('application/json')) {
+                          const json = await resp.json();
+                          if (json?.url) {
+                            window.location.href = json.url;
+                            return;
+                          }
+                          console.error('oauth start returned json without url', json);
+                          alert('Failed to start Google OAuth: missing URL in response');
+                          return;
+                        }
+
+                        // non-json response (likely an HTML error or index.html). Try a backend fallback (common when only Vite is running).
+                        const text = await resp.text().catch(() => '');
+                        console.error('oauth start returned non-json response (likely frontend dev server):', text.slice(0, 200));
+
+                        // Attempt to contact backend directly on port 5050 (dev default) as a fallback
+                        try {
+                          const headers2 = await getAuthHeaders();
+                          const backendOrigin = `${window.location.protocol}//${window.location.hostname}:5050`;
+                          // If user is available, append uid to help debug-only server flows use the real UID
+                          let backendUrl = `${backendOrigin}/api/oauth/google/start`;
+                          if (user?.uid) backendUrl += `?uid=${encodeURIComponent(user.uid)}`;
+                          const resp2 = await fetch(backendUrl, { headers: headers2 });
+                          const ct2 = resp2.headers.get('content-type') || '';
+                          if (!resp2.ok) {
+                            const body2 = await resp2.text().catch(() => '');
+                            console.error('oauth start backend failed', resp2.status, body2);
+                            alert(`Failed to start Google OAuth (backend HTTP ${resp2.status}). See console.`);
+                            return;
+                          }
+                          if (ct2.includes('application/json')) {
+                            const json2 = await resp2.json();
+                            if (json2?.url) {
+                              window.location.href = json2.url;
+                              return;
+                            }
+                            console.error('oauth start backend returned json without url', json2);
+                            alert('Failed to start Google OAuth: backend returned missing URL');
+                            return;
+                          }
+                          const text2 = await resp2.text().catch(() => '');
+                          console.error('oauth start backend returned non-json response:', text2.slice(0, 200));
+                          alert('Failed to start Google OAuth: server returned unexpected response (see console)');
+                        } catch (err) {
+                          console.error('oauth start backend request failed', err);
+                          alert('Failed to reach backend at http://localhost:5050 - ensure you started the server with `npm run dev`. See console.');
+                        }
+                      } catch (e) {
+                        console.error('start oauth failed', e);
+                        alert('Failed to start Google OAuth (network error)');
+                      }
+                    }}>Connect Gmail</Button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </Card>
-
-        {/* WhatsApp credentials form removed */}
+        {/* WhatsApp connect component */}
+        <div>
+          {/* lazy-loaded component to avoid increasing initial bundle - simple import here */}
+          {/* eslint-disable-next-line @typescript-eslint/ban-ts-comment */}
+          {/* @ts-ignore */}
+          <WhatsappConnect />
+        </div>
 
         <Card className="p-8 backdrop-blur-xl bg-card/80 border-2 hover-elevate transition-all duration-500 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-300 relative overflow-hidden">
           <div className="absolute inset-0 bg-gradient-to-br from-chart-3/5 to-transparent rounded-lg -z-10" />
@@ -370,67 +518,31 @@ export default function Settings() {
                 />
               </div>
 
-              <Separator />
-
-              <div className="space-y-2">
-                <Label htmlFor="language" className="text-sm font-medium flex items-center gap-2">
-                  <Globe className="h-4 w-4 text-muted-foreground" />
-                  Language
-                </Label>
-                <Input
-                  id="language"
-                  value={preferences.language}
-                  onChange={(e) =>
-                    setPreferences({ ...preferences, language: e.target.value })
-                  }
-                  data-testid="input-language"
-                  className="transition-all duration-300 focus:ring-2 focus:ring-chart-3/50 bg-background/50"
-                />
+              <div className="flex items-center justify-between">
+                <div className="flex-1">
+                  <Button 
+                    onClick={handleSavePreferences} 
+                    data-testid="button-save-preferences"
+                    className="bg-gradient-to-r from-chart-3 to-chart-4 hover:shadow-lg hover:shadow-chart-3/30 transition-all duration-300 hover:scale-[1.02]"
+                  >
+                    Save Preferences
+                  </Button>
+                </div>
+                <div className="pl-4">
+                  <Button variant="ghost" onClick={async () => {
+                    try {
+                      await signOut?.();
+                    } catch (e) {
+                      console.error('signout failed', e);
+                    }
+                  }}>Sign out</Button>
+                </div>
               </div>
-
-              <Button 
-                onClick={handleSavePreferences} 
-                data-testid="button-save-preferences"
-                className="bg-gradient-to-r from-chart-3 to-chart-4 hover:shadow-lg hover:shadow-chart-3/30 transition-all duration-300 hover:scale-[1.02]"
-              >
-                Save Preferences
-              </Button>
             </div>
           </div>
         </Card>
 
-        <Card className="p-8 border-2 border-destructive/30 bg-destructive/5 backdrop-blur-xl hover:border-destructive/50 transition-all duration-500 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-450 relative overflow-hidden">
-          <div className="absolute inset-0 bg-gradient-to-br from-destructive/10 to-transparent rounded-lg -z-10" />
-          
-          <div className="space-y-6">
-            <div className="flex items-center gap-4">
-              <div className="h-10 w-10 rounded-xl bg-destructive/20 flex items-center justify-center">
-                <AlertTriangle className="h-5 w-5 text-destructive" />
-              </div>
-              <div>
-                <h2 className="text-2xl font-bold text-destructive">Danger Zone</h2>
-                <p className="text-sm text-muted-foreground mt-1">
-                  Irreversible actions that affect your account
-                </p>
-              </div>
-            </div>
-            
-            <div className="p-5 rounded-xl bg-destructive/5 border border-destructive/20">
-              <p className="text-sm text-muted-foreground mb-4">
-                Once you delete your account, there is no going back. Please be certain.
-              </p>
-              <Button
-                variant="destructive"
-                onClick={() => console.log("Delete account")}
-                data-testid="button-delete-account"
-                className="hover:shadow-lg hover:shadow-destructive/30 transition-all duration-300"
-              >
-                <AlertTriangle className="h-4 w-4 mr-2" />
-                Delete Account Permanently
-              </Button>
-            </div>
-          </div>
-        </Card>
+        {/* Danger Zone removed per user request */}
       </div>
     </div>
   );

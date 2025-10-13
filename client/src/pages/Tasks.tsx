@@ -71,7 +71,8 @@ export default function Tasks() {
           description: d.message,
           type: d.type === 'general' ? 'reminder' : d.type,
           priority: 'low',
-          completed: d.status !== 'pending',
+          // only consider status === 'sent' as completed; failed should remain visible
+          completed: d.status === 'sent',
           dueDate: d.datetime ? new Date(d.datetime) : undefined,
           createdAt: new Date(d.created_at || d.createdAt || Date.now()),
         } as Task));

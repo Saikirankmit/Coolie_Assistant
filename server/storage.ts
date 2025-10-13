@@ -120,9 +120,15 @@ export class RemindersStorage {
     return true;
   }
 
-  async fetchDuePending(limit = 100) {
-    const now = new Date().toISOString();
-    const { data, error } = await supabase.from('reminders').select('*').eq('status', 'pending').lte('datetime', now).order('datetime', { ascending: true }).limit(limit);
+  /**
+   * Fetch pending reminders whose datetime is <= now + leadMs.
+   * If `type` is provided, filter by reminder type (e.g. 'gmail').
+   */
+  async fetchDuePending(limit = 100, leadMs = 0, type?: ReminderType) {
+    const cutoff = new Date(Date.now() + Number(leadMs)).toISOString();
+    let query = supabase.from('reminders').select('*').eq('status', 'pending').lte('datetime', cutoff).order('datetime', { ascending: true }).limit(limit);
+    if (type) query = query.eq('type', type);
+    const { data, error } = await query;
     if (error) throw error;
     return data as ReminderRow[];
   }

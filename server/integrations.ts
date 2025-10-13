@@ -11,15 +11,15 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 export type IntegrationType = 'gmail' | 'whatsapp';
 
 export async function upsertUserCredentials(userId: string, type: IntegrationType, data: Record<string, any>) {
-  const payload = {
+  // Use a simple schema keyed by user_id only. Keep signature compatible but ignore `type`
+  const payload: any = {
     user_id: userId,
-    type,
     data,
     updated_at: new Date().toISOString(),
   };
-  // upsert by user_id and type
   try {
-    const { data: out, error } = await supabase.from('user_credentials').upsert(payload, { onConflict: 'user_id,type' }).select().single();
+    // Upsert by user_id (single-row per user)
+    const { data: out, error } = await supabase.from('user_credentials').upsert(payload, { onConflict: 'user_id' }).select().single();
     if (error) {
       console.error('Supabase upsert user_credentials error', error);
       throw error;
@@ -32,7 +32,28 @@ export async function upsertUserCredentials(userId: string, type: IntegrationTyp
 }
 
 export async function getUserCredentials(userId: string, type: IntegrationType) {
-  const { data, error } = await supabase.from('user_credentials').select('*').eq('user_id', userId).eq('type', type).single();
-  if (error) return null;
-  return data;
+  try {
+    // Select by user_id only (schema may not have `type` column)
+    const { data, error } = await supabase.from('user_credentials').select('*').eq('user_id', userId).limit(1).single();
+    if (error) return null;
+    return data;
+  } catch (err) {
+    console.error('getUserCredentials failed', err);
+    return null;
+  }
+}
+
+export async function deleteUserCredentials(userId: string, type: IntegrationType) {
+  try {
+    // Delete by user_id only so this works with simplified schema (no `type` column)
+    const { error } = await supabase.from('user_credentials').delete().eq('user_id', userId);
+    if (error) {
+      console.error('deleteUserCredentials error', error);
+      throw error;
+    }
+    return { ok: true };
+  } catch (err) {
+    console.error('deleteUserCredentials failed', err);
+    throw err;
+  }
 }
