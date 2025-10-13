@@ -430,8 +430,11 @@ export default function Settings() {
                         const text = await resp.text().catch(() => '');
                         console.error('oauth start returned non-json response (likely frontend dev server):', text.slice(0, 200));
 
-                        // Attempt to contact backend directly on port 5050 (dev default) as a fallback
+                        // Attempt to contact backend directly on port 5050 only when running on localhost (dev fallback)
                         try {
+                          if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+                            throw new Error('Skipping localhost backend fallback on non-localhost host');
+                          }
                           const headers2 = await getAuthHeaders();
                           const backendOrigin = `${window.location.protocol}//${window.location.hostname}:5050`;
                           // If user is available, append uid to help debug-only server flows use the real UID
@@ -460,7 +463,8 @@ export default function Settings() {
                           alert('Failed to start Google OAuth: server returned unexpected response (see console)');
                         } catch (err) {
                           console.error('oauth start backend request failed', err);
-                          alert('Failed to reach backend at http://localhost:5050 - ensure you started the server with `npm run dev`. See console.');
+                          const backendOrigin = `${window.location.protocol}//${window.location.hostname}:5050`;
+                          alert(`Failed to reach backend at ${backendOrigin} - ensure your server is running (or remove the fallback). See console.`);
                         }
                       } catch (e) {
                         console.error('start oauth failed', e);

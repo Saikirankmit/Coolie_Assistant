@@ -49,7 +49,7 @@ async function verifyFirebaseToken(req: Request, res: Response, next: NextFuncti
 
 // Allow multiple env var names so local dev (VITE_ prefixed) and server envs both work.
 const N8N_WHATSAPP = process.env.N8N_WHATSAPP_WEBHOOK || process.env.N8N_WEBHOOK_URL || process.env.VITE_N8N_WEBHOOK_URL || process.env.VITE_N8N_WEBHOOK || "http://localhost:5678/webhook-test/whatsapp-mcp";
-const N8N_GMAIL = process.env.N8N_GMAIL_WEBHOOK;
+const N8N_GMAIL = process.env.N8N_GMAIL_WEBHOOK || process.env.N8N_WEBHOOK_URL || process.env.VITE_N8N_WEBHOOK_URL || process.env.VITE_N8N_WEBHOOK || "http://localhost:5678/webhook-test/gmail-action";
 
 // SSE clients per user
 const SSE_CLIENTS: Map<string, Set<import("express").Response>> = new Map();
@@ -112,8 +112,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     // allow using a Vite-prefixed env var for local dev convenience (public client id only)
     const clientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
-  const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || `${process.env.SERVER_BASE_URL || 'http://localhost:5050'}/api/oauth/google/callback`;
+    // In production, require an explicit redirect URI to avoid localhost defaults
+    const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || (process.env.NODE_ENV === 'production' ? undefined : `${process.env.SERVER_BASE_URL || 'http://localhost:5050'}/api/oauth/google/callback`);
     if (!clientId) return res.status(500).json({ message: 'GOOGLE_CLIENT_ID not configured on server. Set GOOGLE_CLIENT_ID in server/.env (or VITE_GOOGLE_CLIENT_ID for local dev).' });
+    if (!redirectUri) return res.status(500).json({ message: 'GOOGLE_OAUTH_REDIRECT_URI not configured. Set GOOGLE_OAUTH_REDIRECT_URI in server/.env for production.' });
 
         const scope = encodeURIComponent([
           'https://www.googleapis.com/auth/gmail.readonly',
@@ -138,9 +140,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       OAUTH_SESSIONS.set(state, { uid, expiresAt: Date.now() + OAUTH_SESSION_TTL });
 
     // allow a dev fallback to VITE_GOOGLE_CLIENT_ID so frontend-only dev setups can test the flow
-    const clientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
-  const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || `${process.env.SERVER_BASE_URL || 'http://localhost:5050'}/api/oauth/google/callback`;
+      const clientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
+    const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || (process.env.NODE_ENV === 'production' ? undefined : `${process.env.SERVER_BASE_URL || 'http://localhost:5050'}/api/oauth/google/callback`);
     if (!clientId) return res.status(500).json({ message: 'GOOGLE_CLIENT_ID not configured on server. Set GOOGLE_CLIENT_ID in server/.env (or VITE_GOOGLE_CLIENT_ID for local dev).' });
+    if (!redirectUri) return res.status(500).json({ message: 'GOOGLE_OAUTH_REDIRECT_URI not configured. Set GOOGLE_OAUTH_REDIRECT_URI in server/.env for production.' });
 
       const scope = encodeURIComponent([
         'https://www.googleapis.com/auth/gmail.readonly',
