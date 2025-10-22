@@ -1,0 +1,48 @@
+services:
+  # Backend Service
+  - type: web
+    name: coolie-assistant-backend
+    env: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: FRONTEND_URL
+        fromService:
+          type: static_site
+          name: coolie-assistant-frontend
+          property: url
+      # Add your environment variables here:
+      # - key: SUPABASE_URL
+      #   sync: false
+      # - key: SUPABASE_SERVICE_ROLE_KEY
+      #   sync: false
+      # - key: FIREBASE_SERVICE_ACCOUNT_JSON
+      #   sync: false
+      # - key: GOOGLE_CLIENT_ID
+      #   sync: false
+      # - key: GOOGLE_CLIENT_SECRET
+      #   sync: false
+
+  # Frontend Service
+  - type: static_site
+    name: coolie-assistant-frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist/public
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: coolie-assistant-backend
+          property: url
+      # Add your Firebase client environment variables here:
+      # - key: VITE_FIREBASE_API_KEY
+      #   sync: false
+      # - key: VITE_FIREBASE_PROJECT_ID
+      #   sync: false
+      # - key: VITE_FIREBASE_APP_ID
+      #   sync: false

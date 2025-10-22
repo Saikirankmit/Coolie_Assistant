@@ -19,6 +19,10 @@ export default defineConfig({
         ]
       : []),
   ],
+  define: {
+    // Make API URL available at build time
+    __API_URL__: JSON.stringify(process.env.VITE_API_URL || 'http://localhost:5050'),
+  },
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "client", "src"),
