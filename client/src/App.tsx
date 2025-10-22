@@ -87,6 +87,7 @@ function AppContent() {
           <div className="flex flex-col flex-1">
             <header className="flex items-center justify-between gap-2 p-2 border-b">
               <SidebarTrigger data-testid="button-sidebar-toggle" />
+              <SidebarTrigger data-testid="button-sidebar-toggle" />
               <NotificationBell />
               <ThemeToggle />
             </header>
@@ -96,9 +97,12 @@ function AppContent() {
           </div>
         </div>
       </SidebarProvider>
+      <Toaster />
     </NotificationProvider>
   );
 }
+
+
 
 export default function App() {
   return (
@@ -111,7 +115,6 @@ export default function App() {
             </ChatProvider>
           </AuthProvider>
         </ThemeProvider>
-        <Toaster />
       </TooltipProvider>
     </QueryClientProvider>
   );

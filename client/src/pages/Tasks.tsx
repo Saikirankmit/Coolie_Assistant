@@ -26,47 +26,97 @@ import { Textarea } from "@/components/ui/textarea";
 export default function Tasks() {
   const [filter, setFilter] = useState<"all" | "gmail" | "whatsapp" | "reminder">("all");
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [loading, setLoading] = useState(true);
   const { user, getIdToken } = useAuth();
   const { toast } = useToast();
   const { addNotification } = useNotification();
-  const [userId, setUserId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (user) setUserId(user.uid as string);
-  }, [user]);
+    // Only fetch reminders if user is authenticated
+    if (!user) {
+      console.log('No user authenticated, skipping reminder fetch');
+      setLoading(false);
+      return;
+    }
 
-  useEffect(() => {
+    console.log('User authenticated, fetching reminders for:', user.uid);
+    setLoading(true);
+    
     // fetch reminders
     (async () => {
       try {
-        if (!getIdToken) return;
+        // hydrate from cache first
+        try {
+          const cached = localStorage.getItem('cached_reminders');
+          console.log('Raw cached data from localStorage:', cached);
+          if (cached) {
+            const parsed = JSON.parse(cached) as any[];
+            console.log('Parsed cached data:', parsed);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              console.log('Loading cached reminders:', parsed.length);
+              const cachedTasks = parsed.map((d, i) => ({
+                id: d.id || `${d.created_at || d.createdAt || Date.now()}-${i}`,
+                title: (d.message || '').slice(0,40) || 'Reminder',
+                description: d.message,
+                type: d.type === 'general' ? 'reminder' : d.type,
+                priority: 'low',
+                completed: d.status === 'sent',
+                dueDate: d.datetime ? new Date(d.datetime) : undefined,
+                createdAt: new Date(d.created_at || d.createdAt || Date.now()),
+              } as Task));
+              console.log('Mapped cached tasks:', cachedTasks);
+              setTasks(cachedTasks);
+            } else {
+              console.log('No cached reminders found or empty array');
+            }
+          } else {
+            console.log('No cached data in localStorage');
+          }
+        } catch (e) {
+          console.warn('Failed to read cached reminders', e);
+        }
+
+        if (!getIdToken) {
+          console.log('getIdToken not available');
+          return;
+        }
         const token = await getIdToken();
-        if (!token) return;
+        if (!token) {
+          console.log('No token available');
+          return;
+        }
+        console.log('Fetching reminders from server...');
         const resp = await fetch('/api/reminders', { headers: { Authorization: `Bearer ${token}` } });
+        console.log('API response status:', resp.status, resp.statusText);
         if (!resp.ok) {
           const text = await resp.text().catch(() => '');
           console.warn('/api/reminders failed', resp.status, text);
-          setTasks([]);
+          // Keep existing tasks instead of wiping them on transient errors
           return;
         }
         const data = await resp.json().catch((e) => {
           console.error('Failed to parse /api/reminders JSON', e);
           return null;
         });
+        console.log('Raw API response data:', data);
         if (!data) {
-          setTasks([]);
+          // parsing failed or no data; leave existing tasks intact
+          console.warn('No data returned from /api/reminders');
           return;
         }
 
         const rows = Array.isArray(data) ? data : (Array.isArray((data as any).data) ? (data as any).data : []);
+        console.log('Processed rows from API:', rows);
         if (!Array.isArray(rows)) {
           console.warn('Unexpected /api/reminders response shape', data);
-          setTasks([]);
+          // unexpected shape; do not clear existing tasks
           return;
         }
 
-        const mapped = rows.map((d: any) => ({
-          id: d.id,
+        console.log('Received reminders from server:', rows.length);
+
+        const mapped = rows.map((d: any, i: number) => ({
+          id: d.id || `${d.created_at || d.createdAt || Date.now()}-${i}`,
           title: (d.message || '').slice(0, 40) || 'Reminder',
           description: d.message,
           type: d.type === 'general' ? 'reminder' : d.type,
@@ -80,72 +130,193 @@ export default function Tasks() {
         // dedupe by id (in case of duplicates) and preserve ordering
         const map = new Map<string, Task>();
         for (const t of mapped) map.set(t.id, t);
-        setTasks(Array.from(map.values()));
+        const final = Array.from(map.values());
+        console.log('Final tasks to set:', final);
+        console.log('Setting tasks count:', final.length);
+        setTasks(final);
+        try {
+          localStorage.setItem('cached_reminders', JSON.stringify(rows));
+          console.log('Cached reminders to localStorage');
+        } catch (e) {
+          console.warn('Failed to cache reminders', e);
+        }
       } catch (err) {
         console.error('Error fetching reminders', err);
-        setTasks([]);
+        // keep cached tasks if fetch fails
+      } finally {
+        setLoading(false);
       }
     })();
 
     // SSE for general reminders
     let sse: EventSource | null = null;
-    (async () => {
-      if (!user) return;
-      const token = await getIdToken();
-      if (!token) return;
-      // request a short-lived connectId
+    let isConnecting = false;
+    
+    const connectSSE = async () => {
+      if (!user || isConnecting) return;
+      isConnecting = true;
+      
       try {
+        const token = await getIdToken();
+        if (!token) return;
+        
+        // Close existing connection if any
+        if (sse) {
+          sse.close();
+          sse = null;
+        }
+        
+        // request a short-lived connectId
         const resp = await fetch('/api/sse/connect', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
-        if (!resp.ok) return;
+        if (!resp.ok) {
+          console.error('SSE connect failed:', resp.status, resp.statusText);
+          return;
+        }
         const body = await resp.json();
         const connectId = body.connectId;
+        console.log('SSE connecting with connectId:', connectId);
+        
         sse = new EventSource(`/api/sse/stream/${connectId}`);
+        
         sse.addEventListener("reminder", (ev: any) => {
-      try {
-        const d = JSON.parse(ev.data);
-        const t: Task = {
-          id: d.id,
-          title: d.message.slice(0, 40),
-          description: d.message,
-          type: "reminder",
-          priority: "low",
-          completed: false,
-          dueDate: d.datetime ? new Date(d.datetime) : undefined,
-          createdAt: new Date(),
-        };
-        setTasks((prev) => {
-          const map = new Map<string, Task>();
-          map.set(t.id, t);
-          for (const p of prev) map.set(p.id, p);
-          return Array.from(map.values());
+          try {
+            console.log('SSE reminder received:', ev.data);
+            const d = JSON.parse(ev.data);
+            
+            // Check if we already have this reminder to avoid duplicates
+            setTasks((prev) => {
+              const existing = prev.find(t => t.id === d.id);
+              if (existing) {
+                console.log('Duplicate reminder ignored:', d.id);
+                return prev;
+              }
+              
+              const t: Task = {
+                id: d.id,
+                title: d.message.slice(0, 40),
+                description: d.message,
+                type: "reminder",
+                priority: "low",
+                completed: false,
+                dueDate: d.datetime ? new Date(d.datetime) : undefined,
+                createdAt: new Date(),
+              };
+              
+              const map = new Map<string, Task>();
+              map.set(t.id, t);
+              for (const p of prev) map.set(p.id, p);
+              return Array.from(map.values());
+            });
+            
+            // show browser notification
+            if (Notification.permission === "granted") {
+              console.log('Showing browser notification for reminder:', d.message);
+              new Notification("Reminder", { body: d.message });
+            } else {
+              console.log('Browser notification permission not granted:', Notification.permission);
+            }
+            // show in-app toast
+            toast({ title: 'Reminder', description: d.message });
+            // add to notification center
+            addNotification({ id: d.id, title: d.message.slice(0,40), description: d.message, type: d.type, completedAt: new Date() });
+          } catch (e) {
+            console.error('Error processing SSE reminder:', e);
+          }
         });
-        // show browser notification
-        if (Notification.permission === "granted") new Notification("Reminder", { body: d.message });
-        // show in-app toast
-        toast({ title: 'Reminder', description: d.message });
-        // add to notification center
-        addNotification({ id: d.id, title: d.message.slice(0,40), description: d.message, type: d.type, completedAt: new Date() });
-      } catch (e) {
-        console.error(e);
-      }
-    });
-      }
-      catch (err) {
+        
+        sse.addEventListener("error", (ev) => {
+          console.error('SSE error:', ev);
+        });
+        
+        sse.addEventListener("open", () => {
+          console.log('SSE connection opened');
+        });
+        
+      } catch (err) {
         console.error('SSE setup failed', err);
+      } finally {
+        isConnecting = false;
       }
-    })();
+    };
+    
+    connectSSE();
 
     return () => {
-      if (sse) sse.close();
+      if (sse) {
+        sse.close();
+        sse = null;
+      }
     };
-  }, [userId]);
+  }, [user, getIdToken]);
 
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>('default');
+  
   // request notification permission on mount (if not granted)
   useEffect(() => {
-    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-      Notification.requestPermission().then(() => {});
+    if (typeof Notification !== 'undefined') {
+      setNotificationPermission(Notification.permission);
+      console.log('Current notification permission:', Notification.permission);
+    } else {
+      console.log('Notification API not available');
     }
   }, []);
+
+  const requestNotificationPermission = async () => {
+    console.log('Requesting notification permission...');
+    
+    if (typeof Notification === 'undefined') {
+      console.error('Notification API not available');
+      toast({ title: 'Notifications not supported', description: 'Your browser does not support notifications.', variant: 'destructive' });
+      return;
+    }
+    
+    try {
+      console.log('Current permission before request:', Notification.permission);
+      
+      // Check if we can request permission
+      if (Notification.permission === 'denied') {
+        console.log('Permission already denied, cannot request again');
+        toast({ 
+          title: 'Notifications blocked', 
+          description: 'Notifications are blocked. Please enable them manually in your browser settings (click the lock icon in the address bar).', 
+          variant: 'destructive' 
+        });
+        return;
+      }
+      
+      const permission = await Notification.requestPermission();
+      console.log('Permission request result:', permission);
+      setNotificationPermission(permission);
+      
+      if (permission === 'granted') {
+        toast({ title: 'Notifications enabled', description: 'You will now receive browser notifications for reminders' });
+        // Test notification
+        new Notification('Test Notification', { 
+          body: 'Notifications are now working!',
+          icon: '/favicon.ico'
+        });
+      } else if (permission === 'denied') {
+        toast({ 
+          title: 'Notifications blocked', 
+          description: 'Please enable notifications in your browser settings (click the lock icon in the address bar).', 
+          variant: 'destructive' 
+        });
+      } else {
+        toast({ 
+          title: 'Permission request dismissed', 
+          description: 'Please try again and click "Allow" when prompted.', 
+          variant: 'destructive' 
+        });
+      }
+    } catch (err) {
+      console.error('Error requesting notification permission:', err);
+      toast({ 
+        title: 'Error', 
+        description: 'Failed to request notification permission. Please enable manually in browser settings.', 
+        variant: 'destructive' 
+      });
+    }
+  };
 
   const handleToggle = (id: string) => {
     setTasks((prev) =>
@@ -217,7 +388,7 @@ export default function Tasks() {
     const integrationType = formType === 'gmail' ? 'gmail' : formType === 'whatsapp' ? 'whatsapp' : null;
     if (integrationType) {
       try {
-        const uid = userId || localStorage.getItem('userId');
+        const uid = user?.uid || localStorage.getItem('userId');
         const flag = uid ? localStorage.getItem(`has_${integrationType}_${uid}`) : null;
         if (flag !== 'true') {
           setErrors({ ...errors, credentials: `Please add ${integrationType} credentials in Settings before creating ${integrationType} tasks.` });
@@ -258,7 +429,7 @@ export default function Tasks() {
     try {
   // formDatetime is in local 'YYYY-MM-DDTHH:mm' format; parse as local and convert to ISO UTC
   const localDate = new Date(formDatetime);
-  const payload: any = { user_id: userId, type: formType, message: formMessage, datetime: localDate.toISOString() };
+  const payload: any = { user_id: user?.uid, type: formType, message: formMessage, datetime: localDate.toISOString() };
       if (formType === 'whatsapp') payload.user_phone = formPhone;
       if (formType === 'gmail') { payload.user_email = formEmail; }
       const token = await getIdToken();
@@ -352,6 +523,7 @@ export default function Tasks() {
               Manage your Gmail, WhatsApp, and reminder tasks
             </p>
           </div>
+          
           <AlertDialog open={open} onOpenChange={setOpen}>
             <AlertDialogTrigger asChild>
               <Button 
@@ -459,7 +631,19 @@ export default function Tasks() {
           </Tabs>
         </div>
 
-        {activeTasks.length === 0 && completedTasks.length === 0 ? (
+        {loading ? (
+          <div className="text-center py-20 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-500">
+            <div className="mb-6 inline-flex">
+              <div className="h-24 w-24 rounded-3xl bg-gradient-to-br from-chart-3/20 to-chart-4/20 flex items-center justify-center">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-chart-3"></div>
+              </div>
+            </div>
+            <h3 className="text-2xl font-semibold mb-2">Loading tasks...</h3>
+            <p className="text-muted-foreground max-w-md mx-auto">
+              Please wait while we fetch your reminders and tasks.
+            </p>
+          </div>
+        ) : activeTasks.length === 0 && completedTasks.length === 0 ? (
           <div className="text-center py-20 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-500">
             <div className="mb-6 inline-flex">
               <div className="h-24 w-24 rounded-3xl bg-gradient-to-br from-chart-3/20 to-chart-4/20 flex items-center justify-center">

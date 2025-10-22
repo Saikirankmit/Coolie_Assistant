@@ -114,8 +114,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const clientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
     // In production, require an explicit redirect URI to avoid localhost defaults
     const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || (process.env.NODE_ENV === 'production' ? undefined : `${process.env.SERVER_BASE_URL || 'http://localhost:5050'}/api/oauth/google/callback`);
-    if (!clientId) return res.status(500).json({ message: 'GOOGLE_CLIENT_ID not configured on server. Set GOOGLE_CLIENT_ID in server/.env (or VITE_GOOGLE_CLIENT_ID for local dev).' });
-    if (!redirectUri) return res.status(500).json({ message: 'GOOGLE_OAUTH_REDIRECT_URI not configured. Set GOOGLE_OAUTH_REDIRECT_URI in server/.env for production.' });
+  if (!clientId) return res.status(500).json({ message: 'GOOGLE_CLIENT_ID not configured on server. Set GOOGLE_CLIENT_ID in .env (or VITE_GOOGLE_CLIENT_ID for local dev).' });
+  if (!redirectUri) return res.status(500).json({ message: 'GOOGLE_OAUTH_REDIRECT_URI not configured. Set GOOGLE_OAUTH_REDIRECT_URI in .env for production.' });
 
         const scope = encodeURIComponent([
           'https://www.googleapis.com/auth/gmail.readonly',
@@ -142,8 +142,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     // allow a dev fallback to VITE_GOOGLE_CLIENT_ID so frontend-only dev setups can test the flow
       const clientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
     const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || (process.env.NODE_ENV === 'production' ? undefined : `${process.env.SERVER_BASE_URL || 'http://localhost:5050'}/api/oauth/google/callback`);
-    if (!clientId) return res.status(500).json({ message: 'GOOGLE_CLIENT_ID not configured on server. Set GOOGLE_CLIENT_ID in server/.env (or VITE_GOOGLE_CLIENT_ID for local dev).' });
-    if (!redirectUri) return res.status(500).json({ message: 'GOOGLE_OAUTH_REDIRECT_URI not configured. Set GOOGLE_OAUTH_REDIRECT_URI in server/.env for production.' });
+  if (!clientId) return res.status(500).json({ message: 'GOOGLE_CLIENT_ID not configured on server. Set GOOGLE_CLIENT_ID in .env (or VITE_GOOGLE_CLIENT_ID for local dev).' });
+  if (!redirectUri) return res.status(500).json({ message: 'GOOGLE_OAUTH_REDIRECT_URI not configured. Set GOOGLE_OAUTH_REDIRECT_URI in .env for production.' });
 
       const scope = encodeURIComponent([
         'https://www.googleapis.com/auth/gmail.readonly',
@@ -178,7 +178,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
     if (!clientId || !clientSecret) {
       console.error('Missing Google client credentials');
-      return res.status(500).send('Server not configured for Google OAuth. Ensure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are set in server/.env. For local testing you can set VITE_GOOGLE_CLIENT_ID for the client id, but the secret must be set as GOOGLE_CLIENT_SECRET on the server.');
+      return res.status(500).send('Server not configured for Google OAuth. Ensure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are set in .env. For local testing you can set VITE_GOOGLE_CLIENT_ID for the client id, but the secret must be set as GOOGLE_CLIENT_SECRET on the server.');
     }
 
       // exchange code for tokens
@@ -233,8 +233,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/reminders", verifyFirebaseToken, async (req, res) => {
     const uid = req.uid!;
     try {
-      const list = await (reminders as any).listByUser ? (reminders as any).listByUser(uid) : await reminders.listAll();
-      res.json(list);
+      let list = await (reminders as any).listByUser ? (reminders as any).listByUser(uid) : await reminders.listAll();
+      if (!Array.isArray(list)) {
+        // ensure we always return an array for client compatibility
+        if (list == null) list = [];
+        else list = [list];
+      }
+      return res.json(list);
     } catch (err: any) {
       res.status(500).json({ message: String(err) });
     }
@@ -565,18 +570,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // In-process poller (every 60s) to dispatch due reminders
   setInterval(async () => {
     try {
-      // fetch only gmail reminders that are due (we handle gmail sends separately and
-      // ensure each reminder is forwarded only once). Use a small lead time so Gmail
-      // reminders can be processed slightly early if needed.
-      const leadMsForGmail = 2 * 60 * 1000; // 2 minutes
-      const gmailReminders = await reminders.fetchDuePending(500, leadMsForGmail, 'gmail');
-      const merged = gmailReminders.sort((a: any, b: any) => new Date(a.datetime).getTime() - new Date(b.datetime).getTime());
+      // fetch all types of reminders that are due
+      const leadMs = 2 * 60 * 1000; // 2 minutes lead time
+      const allReminders = await reminders.fetchDuePending(500, leadMs);
+      const merged = allReminders.sort((a: any, b: any) => new Date(a.datetime).getTime() - new Date(b.datetime).getTime());
+      
+      if (merged.length > 0) {
+        console.log(`[Poller] Found ${merged.length} due reminders:`, merged.map(r => ({ id: r.id, type: r.type, datetime: r.datetime, message: r.message.slice(0, 50) })));
+      }
+      
       // iterate over merged (deduped) reminders
       for (const r of merged) {
         // iterate over merged list instead of just due
         try {
-          // We only process gmail reminders in the poller. Other types are ignored here.
-          if ((r as any).type === "gmail") {
+          // Process whatsapp reminders here first; gmail reminders are handled in the following branch.
+          if ((r as any).type === "whatsapp") {
             // Enrich payload with Firebase user profile where possible
             const payload = { phone: r.user_phone, message: r.message };
             const resp = await fetch(N8N_WHATSAPP, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -650,24 +658,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
             // push to SSE clients if connected
             const clients = SSE_CLIENTS.get(r.user_id);
             const payload = { id: r.id, message: r.message, datetime: r.datetime, type: r.type };
+            console.log(`[Poller] Processing general reminder ${r.id} for user ${r.user_id}, connected clients: ${clients?.size || 0}`);
+            
+            // Mark as sent first to prevent duplicate processing
+            await reminders.markSent(r.id);
+            
             if (clients && clients.size > 0) {
               for (const res of Array.from(clients)) {
                 sendSSE(res, "reminder", payload);
               }
-              await reminders.markSent(r.id);
-              try {
-                await insertNotification({ reminder_id: r.id, user_id: r.user_id, message: r.message, type: r.type, delivered_at: new Date().toISOString() });
-              } catch (err) {
-                console.error('Failed to persist notification for general', err);
-              }
+              console.log(`[Poller] Sent SSE reminder to ${clients.size} clients for reminder ${r.id}`);
             } else {
-              // no clients connected; mark sent anyway (or keep pending) — we'll mark sent
-              await reminders.markSent(r.id);
-              try {
-                await insertNotification({ reminder_id: r.id, user_id: r.user_id, message: r.message, type: r.type, delivered_at: new Date().toISOString() });
-              } catch (err) {
-                console.error('Failed to persist notification for general (no clients)', err);
-              }
+              console.log(`[Poller] No SSE clients connected for user ${r.user_id}, reminder ${r.id} marked as sent`);
+            }
+            
+            try {
+              await insertNotification({ reminder_id: r.id, user_id: r.user_id, message: r.message, type: r.type, delivered_at: new Date().toISOString() });
+              console.log(`[Poller] Persisted notification for general reminder ${r.id}`);
+            } catch (err) {
+              console.error('Failed to persist notification for general', err);
             }
           }
         } catch (err) {

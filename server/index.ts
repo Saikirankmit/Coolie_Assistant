@@ -4,16 +4,16 @@ import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 
-// Load server/.env (if present) into process.env early so modules that are imported
+// Load root .env (if present) into process.env early so modules that are imported
 // afterwards (which read process.env at module-evaluation time) will see these values.
 try {
-  const serverEnvPath = path.resolve(process.cwd(), 'server', '.env');
-  if (fs.existsSync(serverEnvPath)) {
-    dotenv.config({ path: serverEnvPath });
-    console.log('Loaded server/.env into process.env');
+  const rootEnvPath = path.resolve(process.cwd(), '.env');
+  if (fs.existsSync(rootEnvPath)) {
+    dotenv.config({ path: rootEnvPath });
+    console.log('Loaded root .env into process.env');
   }
 } catch (err) {
-  console.warn('Could not load server/.env:', err);
+  console.warn('Could not load .env from project root:', err);
 }
 
 // Global error handlers to capture unhandled promise rejections and exceptions
@@ -105,28 +105,10 @@ async function tryInitFromPath(envPath?: string) {
       if (ok) firebaseInitialized = true;
     }
 
-    // If still not initialized, try to read server/.env (useful when dotenv loaded different file)
-    if (!firebaseInitialized) {
-      try {
-        const serverEnvPath = path.resolve(process.cwd(), 'server', '.env');
-        if (fs.existsSync(serverEnvPath)) {
-          const parsed = dotenv.parse(fs.readFileSync(serverEnvPath, 'utf8'));
-          if (parsed.FIREBASE_ADMIN_CREDENTIALS_PATH) {
-            const ok = await tryInitFromPath(parsed.FIREBASE_ADMIN_CREDENTIALS_PATH);
-            if (ok) firebaseInitialized = true;
-          }
-          if (!firebaseInitialized && parsed.FIREBASE_SERVICE_ACCOUNT_JSON) {
-            const parsedJson = tryParseJson(parsed.FIREBASE_SERVICE_ACCOUNT_JSON);
-            if (parsedJson) {
-              tryInitWithServiceAccount(parsedJson);
-              firebaseInitialized = true;
-            }
-          }
-        }
-      } catch (err) {
-        console.error('Error reading server/.env fallback:', err);
-      }
-    }
+    // No fallback to server/.env — we now expect configuration to live in the
+    // repository root `.env` or in process.env. If FIREBASE_ADMIN_CREDENTIALS_PATH
+    // or FIREBASE_SERVICE_ACCOUNT_JSON are present in process.env they will be
+    // handled by the tryInitFromPath or FIREBASE_SERVICE_ACCOUNT_JSON checks above.
 
     if (!firebaseInitialized) {
       throw new Error('Firebase Admin credentials are required. Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_ADMIN_CREDENTIALS_PATH (and ensure the file exists)');

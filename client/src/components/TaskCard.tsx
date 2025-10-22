@@ -43,7 +43,7 @@ const priorityGradients = {
 };
 
 export function TaskCard({ task, onToggle, onDelete }: TaskCardProps) {
-  const Icon = typeIcons[task.type];
+  const Icon = typeIcons[task.type as keyof typeof typeIcons] ?? null;
   const priorityLabel = task.priority.charAt(0).toUpperCase() + task.priority.slice(1);
 
   return (
@@ -128,12 +128,12 @@ export function TaskCard({ task, onToggle, onDelete }: TaskCardProps) {
               {priorityLabel} Priority
             </Badge>
             
-            <Badge 
-              variant="outline" 
-              className="text-xs gap-1.5 px-3 py-1 bg-card/50 hover:bg-card transition-all duration-300" 
+            <Badge
+              variant="outline"
+              className="text-xs gap-1.5 px-3 py-1 bg-card/50 hover:bg-card transition-all duration-300"
               data-testid={`badge-type-${task.id}`}
             >
-              <Icon className="h-3.5 w-3.5" />
+              {Icon ? <Icon className="h-3.5 w-3.5" /> : null}
               <span className="capitalize">{task.type}</span>
             </Badge>
             
