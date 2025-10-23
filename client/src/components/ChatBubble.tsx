@@ -82,6 +82,11 @@ export function ChatBubble({ message, userName, userAvatar }: ChatBubbleProps) {
                       <a href={a.url} target="_blank" rel="noreferrer" className="text-sm underline">
                         {a.name}
                       </a>
+                    ) : a.mime.startsWith('audio/') ? (
+                      <div className="flex items-center gap-2">
+                        <audio controls src={a.url} className="max-w-[260px]" />
+                        <span className="text-xs text-muted-foreground">{a.name}</span>
+                      </div>
                     ) : (
                       <a href={a.url} target="_blank" rel="noreferrer" className="text-sm underline">
                         {a.name}

@@ -4,6 +4,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Send, Paperclip, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Mic, X } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
+import useMicrophone from "@/hooks/use-microphone";
 import type { ChatMessage } from "@shared/schema";
 
 type Attachment = { name: string; mime: string; url: string };
@@ -22,6 +24,12 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
   // speech recognition
   const [listening, setListening] = useState(false);
   const recognitionRef = useRef<any>(null);
+
+  // microphone hook for recording & permission
+  const { canRecord, permission: permissionState, isRecording, recordingMs, error: recordError, startRecording, stopRecording, requestPermission } = useMicrophone({
+    onRecordingReady: (att) => setAttachments((s) => [...s, att]),
+  });
+  const { toast } = useToast();
 
   useEffect(() => {
     // setup Web Speech API if available
@@ -42,6 +50,18 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
       console.warn('SpeechRecognition init failed', e);
     }
   }, []);
+
+  useEffect(() => {
+    // run diagnostics (log only)
+    console.log('=== MICROPHONE DIAGNOSTICS ===');
+    console.log('Protocol:', location.protocol);
+    console.log('Hostname:', location.hostname);
+    console.log('User Agent:', navigator.userAgent);
+    console.log('MediaDevices available:', !!navigator.mediaDevices);
+    console.log('getUserMedia available:', !!navigator.mediaDevices?.getUserMedia);
+    console.log('MediaRecorder available:', typeof (window as any).MediaRecorder !== 'undefined');
+    console.log('Microphone permission state:', permissionState);
+  }, [permissionState]);
 
   const startListening = () => {
     const r = recognitionRef.current;
@@ -64,6 +84,8 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
       console.warn('Speech stop failed', e);
     }
   };
+
+  // recording handled via useMicrophone hook
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -168,12 +190,14 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
           <Button
             type="button"
             size="icon"
-            variant="ghost"
-            onClick={() => (listening ? stopListening() : startListening())}
-            className="shrink-0 h-12 w-12 rounded-xl hover:bg-primary/10 transition-all duration-300"
-            title="Voice input"
+            variant={isRecording ? "destructive" : "ghost"}
+            onClick={() => (isRecording ? stopRecording() : startRecording())}
+            className="shrink-0 h-12 w-12 rounded-xl transition-all duration-300"
+            title={isRecording ? "Stop recording" : "Record voice"}
+            data-testid="button-record"
+            disabled={!canRecord || permissionState === 'denied'}
           >
-            <Mic className={`h-5 w-5 ${listening ? 'text-red-500 animate-pulse' : ''}`} />
+            <Mic className={`h-5 w-5 ${isRecording ? 'animate-pulse' : ''}`} />
           </Button>
 
           <Button
@@ -196,9 +220,35 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
       </div>
       
       <div className="flex items-center justify-center gap-2 mt-3 text-xs text-muted-foreground">
-        <Sparkles className="h-3 w-3" />
-        <span>Press Enter to send, Shift+Enter for new line — attach images or PDFs, or use voice input</span>
+        {isRecording ? (
+          <>
+            <span className="h-2 w-2 rounded-full bg-red-500 animate-ping" />
+            <span>Recording... {(Math.floor(recordingMs / 1000)).toString().padStart(1, '0')}s — click mic to stop</span>
+          </>
+        ) : (
+          <>
+            <Sparkles className="h-3 w-3" />
+            <span>Press Enter to send, Shift+Enter for new line — attach images, PDFs, or record audio</span>
+          </>
+        )}
       </div>
+      {recordError && (
+        <div className="mt-2 text-center text-xs text-destructive/80">
+          {recordError}
+          {permissionState === 'denied' && (
+            <div className="mt-1">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={requestPermission}
+                className="text-xs h-6 px-2"
+              >
+                Request Permission Again
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
     </form>
   );
 }

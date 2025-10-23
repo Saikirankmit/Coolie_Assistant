@@ -79,17 +79,152 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/webhook/proxy", async (req, res) => {
     const webhookUrl = process.env.N8N_WEBHOOK_URL || process.env.VITE_N8N_WEBHOOK_URL || "http://localhost:5678/webhook-test/whatsapp-mcp";
 
+    // Helper: build an n8n-style items array: [{ json: {...}, binary: { field: { data: base64, mimeType, fileName }}}]
+    const buildItemsFromJson = async (body: any) => {
+      const items: any[] = [];
+
+      // If body is already an array of items, pass-through
+      if (Array.isArray(body) && body.length > 0 && body[0] && (body[0].json || body[0].binary)) {
+        return body;
+      }
+
+      // single item: attempt to extract attachments and convert data: URLs into binary
+      const jsonPart: any = { ...body };
+      const binary: any = {};
+
+      // If attachments array present, convert data URLs to base64 binary fields
+      if (Array.isArray(body.attachments)) {
+        let idx = 0;
+        for (const a of body.attachments) {
+          try {
+            if (typeof a?.url === 'string' && a.url.startsWith('data:')) {
+              // data:<mime>;base64,<base64>
+              const m = /^data:(.*?);base64,(.*)$/.exec(a.url);
+              if (m) {
+                const mime = m[1] || 'application/octet-stream';
+                const b64 = m[2] || '';
+                const name = a.name || `attachment-${idx}`;
+                binary[`file${idx}`] = { data: b64, mimeType: mime, fileName: name };
+                idx++;
+              }
+            } else if (typeof a?.url === 'string') {
+              // include URL info in json so n8n can fetch if required
+              (jsonPart.attachments = jsonPart.attachments || []).push(a);
+            }
+          } catch (e) {
+            console.warn('Failed to convert attachment to binary', e);
+          }
+        }
+      }
+
+      items.push({ json: jsonPart, binary: Object.keys(binary).length ? binary : undefined });
+      return items;
+    };
+
+    // parse multipart/form-data using Busboy when content-type is multipart
+    const contentType = (req.headers['content-type'] || '') as string;
     try {
+      let itemsToSend: any[] | null = null;
+
+      if (contentType.startsWith('multipart/')) {
+        // lazy-require to avoid adding to top-level if not needed
+  // dynamic import and cast to any to avoid TS module resolution issues in different environments
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const Busboy: any = (await import('busboy'))?.default || (await import('busboy'));
+        itemsToSend = [];
+
+        await new Promise<void>((resolve, reject) => {
+          try {
+            const bb = Busboy({ headers: req.headers as any });
+            const jsonPart: any = {};
+            const binary: any = {};
+            let fileIndex = 0;
+
+            bb.on('field', (fieldname: string, val: string) => {
+              // accumulate simple fields
+              try {
+                // try parse JSON fields like attachments
+                if ((fieldname === 'attachments' || fieldname.endsWith('attachments')) && val) {
+                  try {
+                    jsonPart.attachments = JSON.parse(val);
+                    return;
+                  } catch (e) {
+                    // fallthrough
+                  }
+                }
+                // common text fields
+                jsonPart[fieldname] = val;
+              } catch (e) {
+                console.warn('busboy field parse error', e);
+              }
+            });
+
+            bb.on('file', (fieldname: string, file: any, info: any) => {
+              const { filename, mimeType } = info || {};
+              const chunks: Buffer[] = [];
+              file.on('data', (d: Buffer) => chunks.push(d));
+              file.on('end', () => {
+                try {
+                  const buf = Buffer.concat(chunks);
+                  const b64 = buf.toString('base64');
+                  const key = `file${fileIndex++}`;
+                  binary[key] = { data: b64, mimeType: mimeType || 'application/octet-stream', fileName: filename || key };
+                } catch (e) {
+                  console.warn('busboy file handling failed', e);
+                }
+              });
+            });
+
+            bb.on('finish', () => {
+              itemsToSend = [{ json: jsonPart, binary: Object.keys(binary).length ? binary : undefined }];
+              resolve();
+            });
+
+            bb.on('error', (err: any) => reject(err));
+
+            // pipe the raw request to busboy
+            (req as any).pipe(bb);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      } else if (contentType.includes('application/json') || typeof req.body === 'object') {
+        // JSON body: convert attachments with data URLs
+        itemsToSend = await buildItemsFromJson(req.body);
+      } else {
+        // unknown content-type: try to read raw text body and send as a single json field
+        let raw = '';
+        try {
+          raw = await new Promise<string>((resolve) => {
+            let acc = '';
+            req.setEncoding('utf8');
+            req.on('data', (c) => acc += c);
+            req.on('end', () => resolve(acc));
+            req.on('error', () => resolve(''));
+          });
+        } catch (e) {
+          raw = '';
+        }
+        let parsed: any = raw;
+        try { parsed = raw ? JSON.parse(raw) : { raw: '' }; } catch (e) { parsed = { raw }; }
+        itemsToSend = await buildItemsFromJson(parsed);
+      }
+
+      // Prepare the payload for n8n: n8n expects either an array of items or an object { items: [...] }
+      // Common n8n webhook nodes accept POST bodies as an array of items or an object wrapping them.
+      const payloadForN8n = itemsToSend;
+
       const forwarded = await fetch(webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req.body),
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payloadForN8n),
       });
 
       const text = await forwarded.text();
-      res.status(forwarded.status).contentType(forwarded.headers.get("content-type") || "text/plain").send(text);
+      res.status(forwarded.status).contentType(forwarded.headers.get('content-type') || 'text/plain').send(text);
     } catch (err: any) {
-      res.status(502).json({ message: "Failed to forward to n8n webhook", error: String(err) });
+      console.error('Failed to forward to n8n webhook (proxy):', err);
+      res.status(502).json({ message: 'Failed to forward to n8n webhook', error: String(err) });
     }
   });
 

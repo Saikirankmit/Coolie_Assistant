@@ -62,22 +62,67 @@ export default function Chat() {
     setError(null);
 
     try {
-      const payload: any = {
-        message: messageText,
-        attachments: attachments ?? undefined,
-        userId: user?.uid,
-        userName: user?.displayName,
+      // prepare request
+      const hasAudio = Array.isArray(attachments) && attachments.some((a: any) => typeof a?.mime === 'string' && a.mime.startsWith('audio/'));
+
+      const dataUrlToBlob = (dataUrl: string): Blob => {
+        const [meta, base64] = dataUrl.split(',');
+        const mimeMatch = /data:(.*?);base64/.exec(meta || '');
+        const mime = mimeMatch?.[1] || 'application/octet-stream';
+        const binStr = atob(base64 || '');
+        const len = binStr.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) bytes[i] = binStr.charCodeAt(i);
+        return new Blob([bytes], { type: mime });
       };
 
-      console.debug("Sending webhook POST to", WEBHOOK_URL, "payload:", payload);
+      let response: Response;
+      if (hasAudio) {
+        const form = new FormData();
+        form.append('message', messageText);
+        if (user?.uid) form.append('userId', String(user.uid));
+        if (user?.displayName) form.append('userName', String(user.displayName));
 
-      const response = await fetch(WEBHOOK_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
+        // attach files: send all attachments as files for consistency
+        if (Array.isArray(attachments)) {
+          attachments.forEach((a: any, idx: number) => {
+            try {
+              if (typeof a?.url === 'string' && a.url.startsWith('data:')) {
+                const blob = dataUrlToBlob(a.url);
+                const file = new File([blob], a?.name || `attachment-${idx}`, { type: a?.mime || blob.type || 'application/octet-stream' });
+                form.append('files', file, file.name);
+              } else if (typeof a?.url === 'string') {
+                // Non data-URL; include as JSON field for server to fetch if needed
+                form.append(`attachment_${idx}_url`, a.url);
+                if (a?.mime) form.append(`attachment_${idx}_mime`, a.mime);
+                if (a?.name) form.append(`attachment_${idx}_name`, a.name);
+              }
+            } catch (e) {
+              console.warn('Failed to append attachment', a, e);
+            }
+          });
+        }
+
+        console.debug("Sending multipart webhook POST to", WEBHOOK_URL);
+        response = await fetch(WEBHOOK_URL, {
+          method: 'POST',
+          body: form,
+        });
+      } else {
+        const payload: any = {
+          message: messageText,
+          attachments: attachments ?? undefined,
+          userId: user?.uid,
+          userName: user?.displayName,
+        };
+
+        console.debug("Sending JSON webhook POST to", WEBHOOK_URL, "payload:", payload);
+        response = await fetch(WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
 
       if (!response.ok) {
         let errorBody: string | undefined;
