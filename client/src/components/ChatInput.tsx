@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Send, Paperclip, Sparkles } from "lucide-react";
+import { Send, Paperclip, Sparkles, Link } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Mic, X } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -13,9 +13,11 @@ type Attachment = { name: string; mime: string; url: string };
 interface ChatInputProps {
   onSend: (message: string) => void;
   disabled?: boolean;
+  investigateMode?: boolean;
+  investigateType?: 'pdf' | 'url' | null;
 }
 
-export function ChatInput({ onSend, disabled }: ChatInputProps) {
+export function ChatInput({ onSend, disabled, investigateMode, investigateType }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [isFocused, setIsFocused] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -108,7 +110,12 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
 
   const onFilesPicked = async (files?: FileList | null) => {
     if (!files || files.length === 0) return;
-    const allowed = Array.from(files).filter((f) => f.type.startsWith('image/') || f.type === 'application/pdf');
+    const allowed = Array.from(files).filter((f) => {
+      if (investigateMode && investigateType === 'pdf') {
+        return f.type === 'application/pdf';
+      }
+      return f.type.startsWith('image/') || f.type === 'application/pdf';
+    });
     const readPromises = allowed.map((f) => {
       return new Promise<Attachment>((resolve, reject) => {
         const reader = new FileReader();
@@ -137,17 +144,26 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
         "flex gap-3 items-end max-w-4xl mx-auto relative transition-all duration-300",
         isFocused && "scale-[1.01]"
       )}>
-        <input ref={fileInputRef} type="file" accept="image/*,application/pdf" multiple className="hidden" onChange={(e) => onFilesPicked(e.target.files)} />
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="shrink-0 h-12 w-12 rounded-xl hover:bg-primary/10 hover:text-primary transition-all duration-300 hover:scale-110"
-          data-testid="button-attach"
-          onClick={triggerFilePicker}
-        >
-          <Paperclip className="h-5 w-5" />
-        </Button>
+        <input 
+      ref={fileInputRef} 
+      type="file" 
+      accept={investigateMode && investigateType === 'pdf' ? 'application/pdf' : 'image/*,application/pdf'} 
+      multiple={!investigateMode} 
+      className="hidden" 
+      onChange={(e) => onFilesPicked(e.target.files)} 
+    />
+        {(!investigateMode || investigateType === 'pdf') && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="shrink-0 h-12 w-12 rounded-xl hover:bg-primary/10 hover:text-primary transition-all duration-300"
+            data-testid="button-attach"
+            onClick={triggerFilePicker}
+          >
+            <Paperclip className="h-5 w-5" />
+          </Button>
+        )}
         
         <div className="flex-1 relative">
           <Textarea
@@ -186,21 +202,38 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
           ))}
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            size="icon"
-            variant={isRecording ? "destructive" : "ghost"}
-            onClick={() => (isRecording ? stopRecording() : startRecording())}
-            className="shrink-0 h-12 w-12 rounded-xl transition-all duration-300"
-            title={isRecording ? "Stop recording" : "Record voice"}
-            data-testid="button-record"
-            disabled={!canRecord || permissionState === 'denied'}
-          >
-            <Mic className={`h-5 w-5 ${isRecording ? 'animate-pulse' : ''}`} />
-          </Button>
-
-          <Button
+          <div className="flex items-center gap-2">
+            {/* URL input dialog - only show in URL mode */}
+            {investigateMode && investigateType === 'url' && (
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                onClick={() => {
+                  const url = window.prompt("Enter URL to analyze:");
+                  if (url) {
+                    setMessage((prev) => `${prev.trim() ? prev + '\n' : ''}${url}`);
+                  }
+                }}
+                className="shrink-0 h-12 w-12 rounded-xl transition-all duration-300"
+                title="Paste URL to analyze"
+              >
+                <Link className="h-5 w-5" />
+              </Button>
+            )}
+            
+            <Button
+              type="button"
+              size="icon"
+              variant={isRecording ? "destructive" : "ghost"}
+              onClick={() => (isRecording ? stopRecording() : startRecording())}
+              className="shrink-0 h-12 w-12 rounded-xl transition-all duration-300"
+              title={isRecording ? "Stop recording" : "Record voice"}
+              data-testid="button-record"
+              disabled={!canRecord || permissionState === 'denied'}
+            >
+              <Mic className={`h-5 w-5 ${isRecording ? 'animate-pulse' : ''}`} />
+            </Button>          <Button
             type="submit"
             size="icon"
             disabled={!(message.trim() || attachments.length > 0) || disabled}

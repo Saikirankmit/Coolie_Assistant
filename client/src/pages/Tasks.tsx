@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { TaskCard } from "@/components/TaskCard";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Plus, Mail, MessageCircle, AlertCircle, CheckCircle2 } from "lucide-react";
+import { Plus, Mail, MessageCircle, AlertCircle, CheckCircle2, Play } from "lucide-react";
 import type { Task } from "@shared/schema";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
@@ -24,7 +24,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@
 import { Textarea } from "@/components/ui/textarea";
 
 export default function Tasks() {
-  const [filter, setFilter] = useState<"all" | "gmail" | "whatsapp" | "reminder">("all");
+  const [filter, setFilter] = useState<"all" | "gmail" | "whatsapp" | "reminder" | "youtube">("all");
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const { user, getIdToken } = useAuth();
@@ -115,11 +115,12 @@ export default function Tasks() {
 
         console.log('Received reminders from server:', rows.length);
 
-        const mapped = rows.map((d: any, i: number) => ({
+            const mapped = rows.map((d: any, i: number) => ({
           id: d.id || `${d.created_at || d.createdAt || Date.now()}-${i}`,
           title: (d.message || '').slice(0, 40) || 'Reminder',
           description: d.message,
-          type: d.type === 'general' ? 'reminder' : d.type,
+              // normalize youtube type if present
+              type: d.type === 'general' ? 'reminder' : (d.type === 'youtube' ? 'youtube' : d.type),
           priority: 'low',
           // only consider status === 'sent' as completed; failed should remain visible
           completed: d.status === 'sent',
@@ -318,7 +319,72 @@ export default function Tasks() {
     }
   };
 
-  const handleToggle = (id: string) => {
+    const openYoutubeFromTask = async (task: Task) => {
+      try {
+        // Try extract a YouTube URL/time from the task description
+        const msg = task.description || '';
+        // look for an explicit YouTube URL
+        const urlRegex = /(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/[\S]+/i;
+        const urlMatch = msg.match(urlRegex);
+        let url: string | null = urlMatch ? urlMatch[0] : null;
+
+        // extract time like t=123 or start=123 in URL
+        const timeParamRegex = /(?:t=|start=)(\d+)(s)?/i;
+        let seconds: number | null = null;
+        if (url) {
+          const m = url.match(timeParamRegex);
+          if (m && m[1]) seconds = Number(m[1]);
+        }
+
+        // If no explicit url, call server youtube open endpoint to search
+        if (!url) {
+          try {
+            const token = await getIdToken();
+            const resp = await fetch('/api/youtube/open', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ query: msg }) });
+            if (resp.ok) {
+              const j = await resp.json();
+              url = j?.video?.url || null;
+            }
+          } catch (e) {
+            console.warn('YouTube search failed for task open', e);
+          }
+        }
+
+        // attempt to parse natural-language time like "at 1:30" or "at 90s"
+        if (seconds === null) {
+          const atTimeRegex = /at\s+(\d+:)?\d{1,2}(?::\d{2})?\s*(am|pm)?/i; // rough
+          const m = msg.match(/at\s+(\d+:)?(\d{1,2})(?::(\d{2}))?/i);
+          if (m) {
+            // convert mm:ss or hh:mm:ss to seconds
+            const parts = m[0].replace(/at/i, '').trim().split(':').map(p => p.replace(/[^0-9]/g, ''));
+            let s = 0;
+            if (parts.length === 3) s = Number(parts[0]) * 3600 + Number(parts[1]) * 60 + Number(parts[2]);
+            else if (parts.length === 2) s = Number(parts[0]) * 60 + Number(parts[1]);
+            else s = Number(parts[0]);
+            if (!Number.isNaN(s)) seconds = s;
+          }
+        }
+
+        if (url) {
+          // add start time if available
+          if (seconds && !/([?&])(t|start)=/.test(url)) {
+            const sep = url.includes('?') ? '&' : '?';
+            url = `${url}${sep}t=${seconds}s`;
+          }
+          // try open
+          try {
+            const w = window.open(url, '_blank', 'noopener,noreferrer');
+            if (w) try { w.focus(); } catch (e) {}
+          } catch (e) {
+            console.warn('Failed to open YouTube from task', e);
+          }
+        }
+      } catch (e) {
+        console.error('openYoutubeFromTask error', e);
+      }
+    };
+
+    const handleToggle = (id: string) => {
     setTasks((prev) =>
       prev.map((task) =>
         task.id === id ? { ...task, completed: !task.completed } : task
@@ -339,6 +405,10 @@ export default function Tasks() {
             toast({ title: 'Task updated', description: `Task ${task.title} marked ${newStatus === 'sent' ? 'complete' : 'pending'}` });
             if (newStatus === 'sent') {
               addNotification({ id: task.id, title: task.title, description: task.description, type: task.type, completedAt: new Date() });
+              // If this is a YouTube task, open the video when marked sent/completed
+              if (task.type === 'youtube') {
+                openYoutubeFromTask(task);
+              }
             }
           }
         } catch (err) {
@@ -368,7 +438,7 @@ export default function Tasks() {
 
   // --- Modal form state and submit handler ---
   const [open, setOpen] = useState(false);
-  const [formType, setFormType] = useState<'general' | 'whatsapp' | 'gmail'>('general');
+  const [formType, setFormType] = useState<'general' | 'whatsapp' | 'gmail' | 'youtube'>('general');
   const [formMessage, setFormMessage] = useState('');
   // Helper: format a Date to a value usable by <input type="datetime-local"> (YYYY-MM-DDTHH:mm)
   const formatForDatetimeLocal = (d: Date) => {
@@ -389,8 +459,11 @@ export default function Tasks() {
     if (integrationType) {
       try {
         const uid = user?.uid || localStorage.getItem('userId');
-        const flag = uid ? localStorage.getItem(`has_${integrationType}_${uid}`) : null;
-        if (flag !== 'true') {
+        // Accept both uid-scoped flag (has_gmail_<uid>) and legacy/global flag (has_gmail)
+        let flag: string | null = null;
+        if (uid) flag = localStorage.getItem(`has_${integrationType}_${uid}`);
+        if (!flag) flag = localStorage.getItem(`has_${integrationType}`);
+        if (flag !== 'true' && flag !== '1' && !flag) {
           setErrors({ ...errors, credentials: `Please add ${integrationType} credentials in Settings before creating ${integrationType} tasks.` });
           toast({ title: 'Missing credentials', description: `Go to Settings and save your ${integrationType} credentials to enable ${integrationType} tasks.`, variant: 'destructive' });
           return;
@@ -427,9 +500,13 @@ export default function Tasks() {
     setErrors({});
     setSubmitting(true);
     try {
-  // formDatetime is in local 'YYYY-MM-DDTHH:mm' format; parse as local and convert to ISO UTC
-  const localDate = new Date(formDatetime);
-  const payload: any = { user_id: user?.uid, type: formType, message: formMessage, datetime: localDate.toISOString() };
+      // formDatetime is in local 'YYYY-MM-DDTHH:mm' format; parse as local and convert to ISO UTC
+      const localDate = new Date(formDatetime);
+      // The server expects types 'whatsapp' | 'gmail' | 'general'. To avoid server-side enum/db errors,
+      // map client-only 'youtube' tasks to 'general' when sending to the API. The client will still
+      // display the created task as 'youtube' locally.
+      const sendType = formType === 'youtube' ? 'general' : formType;
+      const payload: any = { user_id: user?.uid, type: sendType, message: formMessage, datetime: localDate.toISOString() };
       if (formType === 'whatsapp') payload.user_phone = formPhone;
       if (formType === 'gmail') { payload.user_email = formEmail; }
       const token = await getIdToken();
@@ -442,7 +519,8 @@ export default function Tasks() {
           id: data.id,
           title: data.message.slice(0, 40),
           description: data.message,
-          type: data.type === 'general' ? 'reminder' : data.type,
+          // If the user created a YouTube task in the UI, prefer to show it as 'youtube' client-side
+          type: formType === 'youtube' ? 'youtube' : (data.type === 'general' ? 'reminder' : data.type),
           priority: 'low',
           completed: false,
           dueDate: data.datetime ? new Date(data.datetime) : undefined,
@@ -507,6 +585,13 @@ export default function Tasks() {
       gradient: "from-chart-4/20 to-chart-4/10",
       iconColor: "text-chart-4",
     },
+    {
+      label: "YouTube",
+      value: tasks.filter((t) => t.type === "youtube").length,
+      icon: Play,
+      gradient: "from-red-500/20 to-red-600/10",
+      iconColor: "text-red-500",
+    },
   ];
 
   return (
@@ -520,7 +605,7 @@ export default function Tasks() {
               Tasks Dashboard
             </h1>
             <p className="text-muted-foreground text-lg">
-              Manage your Gmail, WhatsApp, and reminder tasks
+              Manage your Gmail, WhatsApp, YouTube, and reminder tasks
             </p>
           </div>
           
@@ -539,7 +624,7 @@ export default function Tasks() {
               <AlertDialogHeader>
                 <AlertDialogTitle>Create a Task</AlertDialogTitle>
                 <AlertDialogDescription>
-                  Create a Gmail, WhatsApp or general reminder task.
+                  Create a Gmail, WhatsApp, YouTube or general reminder task.
                 </AlertDialogDescription>
               </AlertDialogHeader>
 
@@ -549,10 +634,11 @@ export default function Tasks() {
                   <Select onValueChange={(v) => setFormType(v as any)} value={formType}>
                     <SelectTrigger className="w-full"><SelectValue placeholder="Select type" /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="general">General</SelectItem>
-                      <SelectItem value="whatsapp">WhatsApp</SelectItem>
-                      <SelectItem value="gmail">Gmail</SelectItem>
-                    </SelectContent>
+                        <SelectItem value="general">General</SelectItem>
+                        <SelectItem value="whatsapp">WhatsApp</SelectItem>
+                        <SelectItem value="youtube">YouTube</SelectItem>
+                        <SelectItem value="gmail">Gmail</SelectItem>
+                      </SelectContent>
                   </Select>
                   {errors.credentials && <p className="text-sm text-destructive mt-2">{errors.credentials}</p>}
                 </div>
@@ -571,13 +657,6 @@ export default function Tasks() {
                     <Label>Phone (E.164)</Label>
                     <Input value={formPhone} onChange={(e) => setFormPhone(e.target.value)} placeholder="+15551234567" />
                     {errors.phone && <p className="text-sm text-destructive mt-1">{errors.phone}</p>}
-                  </div>
-                )}
-                {formType === 'gmail' && (
-                  <div>
-                    <Label>Email</Label>
-                    <Input value={formEmail} onChange={(e) => setFormEmail(e.target.value)} placeholder="you@gmail.com" />
-                    {errors.email && <p className="text-sm text-destructive mt-1">{errors.email}</p>}
                   </div>
                 )}
               </div>
@@ -622,6 +701,10 @@ export default function Tasks() {
               <TabsTrigger value="whatsapp" data-testid="tab-whatsapp" className="data-[state=active]:bg-gradient-to-r data-[state=active]:from-chart-3/10 data-[state=active]:to-chart-4/10">
                 <MessageCircle className="h-4 w-4 mr-1" />
                 WhatsApp ({tasks.filter((t) => t.type === "whatsapp").length})
+              </TabsTrigger>
+              <TabsTrigger value="youtube" data-testid="tab-youtube" className="data-[state=active]:bg-gradient-to-r data-[state=active]:from-red-50/10 data-[state=active]:to-red-600/10">
+                <Play className="h-4 w-4 mr-1" />
+                YouTube ({tasks.filter((t) => t.type === "youtube").length})
               </TabsTrigger>
               <TabsTrigger value="reminder" data-testid="tab-reminder" className="data-[state=active]:bg-gradient-to-r data-[state=active]:from-chart-4/10 data-[state=active]:to-chart-5/10">
                 <AlertCircle className="h-4 w-4 mr-1" />

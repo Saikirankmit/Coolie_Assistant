@@ -5,13 +5,13 @@ import { ChatInput } from "@/components/ChatInput";
 import { useAuth } from "@/contexts/AuthContext";
 import { useChat } from "@/contexts/ChatContext";
 import { Button } from "@/components/ui/button";
-import { Trash2, Sparkles } from "lucide-react";
-import { PlusCircle, Archive } from "lucide-react";
+import { Trash2, Sparkles, PlusCircle, Archive, Search, MessageSquare, Link } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 const WEBHOOK_URL = import.meta.env.VITE_CLIENT_WEBHOOK_URL || "/api/webhook/proxy";
 
 export default function Chat() {
-  const { user } = useAuth();
+  const { user, getIdToken } = useAuth();
   const {
     messages,
     addMessage,
@@ -26,6 +26,8 @@ export default function Chat() {
   } = useChat();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isInvestigateMode, setIsInvestigateMode] = useState(false);
+  const [investigateType, setInvestigateType] = useState<'pdf' | 'url' | null>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -35,11 +37,147 @@ export default function Chat() {
     scrollToBottom();
   }, [messages, isTyping]);
 
+  const toggleChatMode = () => {
+    if (isInvestigateMode) {
+      // Switching to normal mode
+      setIsInvestigateMode(false);
+      setInvestigateType(null);
+    } else {
+      // Show option dialog when switching to investigate mode
+      const type = window.prompt('Select investigation type (pdf/url):')?.toLowerCase();
+      if (type === 'pdf' || type === 'url') {
+        setIsInvestigateMode(true);
+        setInvestigateType(type);
+      }
+    }
+  };
+
   const handleSendMessage = async (content: string) => {
     // ChatInput may send structured payloads (JSON) containing message and attachments.
     let messageText = content;
     let attachments: any = undefined;
+    let url: string | undefined;
+
+    // allow building a prebuilt payload for investigate URL mode so sending goes through the same path
+    let prebuiltPayload: any = null;
     try {
+      // Only send webhook for user messages and only if message was created recently (< 2 minutes)
+      const now = Date.now();
+      // Handle investigate mode payload
+      if (isInvestigateMode) {
+        if (investigateType === 'url') {
+          const urlRegex = /https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)/;
+          const urlMatch = messageText.match(urlRegex);
+          if (!urlMatch) {
+            setError("Please provide a valid URL in investigate URL mode");
+            return;
+          }
+
+          // Create payload and defer sending to the shared send logic below
+          prebuiltPayload = {
+            message: messageText.trim(),
+            url: urlMatch[0],
+            userName: user?.displayName || "Anonymous",
+            userId: user?.uid,
+            investigateMode: true,
+            investigateType: 'url'
+          };
+
+          // don't return here; we'll use prebuiltPayload later to send via the common path
+        }
+
+        if (investigateType === 'pdf' && (!attachments || attachments.length === 0)) {
+          setError("Please attach a PDF file in investigate PDF mode");
+          return;
+        }
+      }
+
+  // Always try the YouTube endpoint - it will use Gemini to detect video intents
+  // Track whether this message was handled locally (video opened) to avoid duplicate webhook calls
+  let handled = false;
+  try {
+        let token: string | null = null;
+        try {
+          token = typeof getIdToken === 'function' ? (await getIdToken()) : null;
+        } catch (e) {
+          console.warn('Failed to get id token for youtube open', e);
+          token = null;
+        }
+
+        const resp = await fetch('/api/youtube/open', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify({ query: messageText }),
+        });
+        
+        if (resp.ok) {
+          const json = await resp.json();
+
+          // If it's a video request with high confidence, handle it
+          if (json?.status === 'success' && json.isVideoRequest && json.confidence > 0.7 && json.video?.url) {
+            const { video, searchQuery } = json;
+
+            // Try opening the video. We'll attempt multiple methods to reduce false 'blocked' reports.
+            const handledVideo = { opened: false, url: video.url } as { opened: boolean; url: string };
+
+            // First attempt: window.open (preferred)
+            try {
+              const videoWindow = window.open(video.url, '_blank', 'noopener,noreferrer');
+              if (videoWindow) {
+                handledVideo.opened = true;
+                try { videoWindow.focus(); } catch (e) { /* ignore focus errors */ }
+              }
+            } catch (e) {
+              console.warn('window.open threw when trying to open video:', e);
+            }
+
+            // Second attempt: programmatic anchor click (works in some browsers/contexts)
+            if (!handledVideo.opened) {
+              try {
+                const a = document.createElement('a');
+                a.href = video.url;
+                a.target = '_blank';
+                a.rel = 'noopener noreferrer';
+                // Some browsers require the element to be in the document to allow opening
+                a.style.display = 'none';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                // We can't reliably detect success, but if no exception thrown assume it opened
+                handledVideo.opened = true;
+              } catch (e) {
+                console.warn('Programmatic anchor click failed to open video:', e);
+                handledVideo.opened = false;
+              }
+            }
+
+            // Craft assistant message: include fallback link only when both methods indicate failure
+            const assistantMsg = {
+              id: (Date.now() + 1).toString(),
+              content: handledVideo.opened
+                ? `📺 I found a video that matches your request!\n\nTitle: ${video.title}\nChannel: ${video.channel}\n\nI've opened it in a new tab for you.`
+                : `📺 I found a video that matches your request!\n\nTitle: ${video.title}\nChannel: ${video.channel}\n\nI couldn't open a new tab (likely blocked by your browser). You can open it here: ${video.url}`,
+              role: 'assistant' as const,
+              timestamp: new Date(),
+            };
+
+            addMessage(assistantMsg);
+            setIsTyping(false);
+            handled = true;
+            // Stop further processing (don't send webhook) since we've handled the video
+            return;
+          }
+          
+          // If we got here, either:
+          // 1. Not a video request (continue with normal chat)
+          // 2. Low confidence (continue with normal chat)
+          // 3. No video found (continue with normal chat)
+        }
+      } catch (e) {
+        console.warn('YouTube/video handling failed:', e);
+        // Continue with normal chat flow on error
+      }
+
       const parsed = JSON.parse(content);
       if (parsed && typeof parsed === 'object' && 'message' in parsed) {
         messageText = String(parsed.message ?? "");
@@ -49,12 +187,32 @@ export default function Chat() {
       // not JSON; treat content as plain text
     }
 
+    let payload: any;
+    
+    if (isInvestigateMode && investigateType === 'pdf') {
+      payload = {
+        message: messageText,
+        userName: user?.displayName || "Anonymous",
+        userId: user?.uid,
+        investigateMode: true,
+        investigateType: 'pdf',
+        files: attachments
+      };
+    } else {
+      // Regular chat mode
+      payload = {
+        message: messageText,
+        userName: user?.displayName || "Anonymous",
+        userId: user?.uid,
+      };
+    }
+
     const userMessage = {
       id: Date.now().toString(),
       content: messageText,
       role: "user" as const,
       timestamp: new Date(),
-      attachments: attachments ?? undefined,
+      attachments: !isInvestigateMode ? attachments : undefined,
     };
 
     addMessage(userMessage);
@@ -76,8 +234,29 @@ export default function Chat() {
         return new Blob([bytes], { type: mime });
       };
 
-      let response: Response;
-      if (hasAudio) {
+  let response: Response;
+  let didSendWebhook = false;
+  let data: any = null;
+  let rawText: string | null = null;
+      // Ensure this handler only triggers the external webhook for recent user messages
+      // userMessage.timestamp was just created above so this should normally pass; this
+      // protects against delayed/replicated sends where the webhook should not be invoked.
+      const now = Date.now();
+      const sentAt = userMessage.timestamp instanceof Date ? userMessage.timestamp.getTime() : now;
+      const twoMinutes = 2 * 60 * 1000;
+      if ((now - sentAt) > twoMinutes) {
+        console.debug('Message too old to send to webhook (skipping)', { now, sentAt });
+      } else {
+      // If we built a prebuiltPayload (URL investigate) use it directly and send as JSON
+      if (prebuiltPayload) {
+        console.debug("Sending prebuilt JSON webhook POST to", WEBHOOK_URL, "payload:", prebuiltPayload);
+        response = await fetch(WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(prebuiltPayload),
+        });
+        didSendWebhook = true;
+      } else if (hasAudio) {
         const form = new FormData();
         form.append('message', messageText);
         if (user?.uid) form.append('userId', String(user.uid));
@@ -108,54 +287,73 @@ export default function Chat() {
           method: 'POST',
           body: form,
         });
+        didSendWebhook = true;
       } else {
-        const payload: any = {
+        // For investigate modes do not include attachments in the JSON payload
+        const jsonPayload: any = {
           message: messageText,
-          attachments: attachments ?? undefined,
           userId: user?.uid,
-          userName: user?.displayName,
+          userName: user?.displayName || "Anonymous",
         };
+        if (!isInvestigateMode) jsonPayload.attachments = attachments ?? undefined;
 
-        console.debug("Sending JSON webhook POST to", WEBHOOK_URL, "payload:", payload);
+        console.debug("Sending JSON webhook POST to", WEBHOOK_URL, "payload:", jsonPayload);
         response = await fetch(WEBHOOK_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          body: JSON.stringify(jsonPayload),
         });
+        didSendWebhook = true;
       }
+    }
 
-      if (!response.ok) {
-        let errorBody: string | undefined;
-        try {
-          const json = await response.json();
-          errorBody = JSON.stringify(json);
-        } catch (e) {
+      if (!didSendWebhook) {
+        // No webhook was sent (message was too old); treat as no response
+        data = null;
+        rawText = null;
+      } else {
+        // We did send a webhook and have a response object
+        if (!response!) {
+          // defensive: if response is somehow missing, treat as no content
+          data = null;
+          rawText = null;
+        } else {
+          if (!response!.ok) {
+            let errorBody: string | undefined;
+            try {
+              const json = await response!.json();
+              errorBody = JSON.stringify(json);
+            } catch (e) {
+              try {
+                errorBody = await response!.text();
+              } catch (e) {
+                errorBody = undefined;
+              }
+            }
+            const message = `HTTP error! status: ${response!.status}${errorBody ? ` - ${errorBody}` : ""}`;
+            throw new Error(message);
+          }
+
+          // Try to read response as text first, then parse JSON if possible.
           try {
-            errorBody = await response.text();
+            rawText = await response!.text();
+            try {
+              data = rawText ? JSON.parse(rawText) : rawText;
+            } catch (e) {
+              data = rawText;
+            }
           } catch (e) {
-            errorBody = undefined;
+            console.warn('Failed to read response body', e);
+            data = null;
+            rawText = null;
           }
         }
-
-        const message = `HTTP error! status: ${response.status}${errorBody ? ` - ${errorBody}` : ""}`;
-        throw new Error(message);
       }
 
-      // Try to read response as text first, then parse JSON if possible.
-      let data: any = null;
-      let rawText: string | null = null;
-      try {
-        rawText = await response.text();
-        try {
-          data = rawText ? JSON.parse(rawText) : rawText;
-        } catch (e) {
-          data = rawText;
-        }
-      } catch (e) {
-        console.warn('Failed to read response body', e);
-      }
-
-      // Derive assistant content from common fields or fallbacks
+        // If in investigate mode and a URL was sent, add a visual indicator
+        if (url) {
+          messageText = `🔗 Analyzing URL: ${url}\n${messageText}`;
+        }      // Derive assistant content from common fields or fallbacks
       let assistantContent = "I received your message!";
       let assistantModel: string | undefined = undefined;
 
@@ -268,6 +466,18 @@ export default function Chat() {
         }
       }
 
+      // If the webhook indicates it handled the message (e.g., handled: 'youtube'), skip adding its response
+      try {
+        const maybeHandled = (typeof data === 'object' && data && (data.handled || (Array.isArray(data) && data[0]?.handled))) || (typeof rawText === 'string' && rawText.includes('"handled"'));
+        if (maybeHandled) {
+          // If the webhook already returned the youtube video object, we prefer the client-side handling (which already showed the video)
+          console.debug('Webhook response indicated handled action, skipping assistant message to avoid duplicate');
+          return;
+        }
+      } catch (e) {
+        // ignore errors in handled detection
+      }
+
       // If we still ended up with the default message, fall back to rawText or a JSON dump so user sees something useful.
       if (assistantContent === 'I received your message!') {
         try {
@@ -296,7 +506,12 @@ export default function Chat() {
         timestamp: new Date(),
       };
       if (assistantModel) assistantMessage.model = assistantModel;
-      addMessage(assistantMessage);
+      // Avoid adding noisy empty responses
+      if (assistantMessage.content && assistantMessage.content !== '(empty response)') {
+        addMessage(assistantMessage);
+      } else {
+        console.debug('Filtered out empty assistant response');
+      }
     } catch (err) {
       console.error("Error sending message:", err);
       const friendly = "Server unreachable — please check your connection and try again.";
@@ -374,18 +589,38 @@ export default function Chat() {
                 <p className="text-sm text-muted-foreground">Your AI assistant is here to help</p>
               </div>
             </div>
-            {messages.length > 0 && (
+            <div className="flex items-center gap-4">
+              {messages.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={clearMessages}
+                  data-testid="button-clear-chat"
+                  className="hover:bg-destructive/10 hover:text-destructive transition-all duration-300"
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Clear Chat
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={clearMessages}
-                data-testid="button-clear-chat"
-                className="hover:bg-destructive/10 hover:text-destructive transition-all duration-300"
+                onClick={toggleChatMode}
+                data-testid="button-chat-mode"
               >
-                <Trash2 className="h-4 w-4 mr-2" />
-                Clear Chat
+                {isInvestigateMode ? (
+                  <>
+                    <Search className="h-4 w-4 mr-2" />
+                    {investigateType === 'pdf' ? 'PDF Mode' : 'URL Mode'}
+                  </>
+                ) : (
+                  <>
+                    <MessageSquare className="h-4 w-4 mr-2" />
+                    Chat Mode
+                  </>
+                )}
               </Button>
-            )}
+            </div>
           </div>
         </div>
 
@@ -431,7 +666,12 @@ export default function Chat() {
           </div>
         </div>
 
-        <ChatInput onSend={handleSendMessage} disabled={isTyping} />
+        <ChatInput 
+          onSend={handleSendMessage} 
+          disabled={isTyping} 
+          investigateMode={isInvestigateMode}
+          investigateType={investigateType}
+        />
       </main>
     </div>
   );

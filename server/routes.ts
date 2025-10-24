@@ -75,6 +75,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     console.error('Failed to register whatsapp routes', e);
   }
 
+  // Import Gemini functions
+  let analyzeImage: ((base64Image: string, prompt?: string) => Promise<string>) | undefined;
+  let analyzeText: ((text: string, prompt?: string) => Promise<string>) | undefined;
+  try {
+    const gemini = await import('./gemini');
+    analyzeImage = gemini.analyzeImage;
+    analyzeText = gemini.analyzeText;
+  } catch (e) {
+    console.warn('Failed to import Gemini integration:', e);
+  }
+  
+  // Import scraper utility
+  const { scrapeWebpage } = await import('./lib/scraper');
+
   // Proxy endpoint to forward messages to the configured n8n webhook
   app.post("/api/webhook/proxy", async (req, res) => {
     const webhookUrl = process.env.N8N_WEBHOOK_URL || process.env.VITE_N8N_WEBHOOK_URL || "http://localhost:5678/webhook-test/whatsapp-mcp";
@@ -212,7 +226,189 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Prepare the payload for n8n: n8n expects either an array of items or an object { items: [...] }
       // Common n8n webhook nodes accept POST bodies as an array of items or an object wrapping them.
-      const payloadForN8n = itemsToSend;
+      // Import PDF processor if needed
+      let { processPDFDocument, queryDocument } = await import('./pdfProcessor');
+
+      // Check for attachments (images or PDFs)
+      let analysisResult = '';
+      if (Array.isArray(itemsToSend) && itemsToSend.length > 0) {
+        const firstItem = itemsToSend[0];
+
+        // Server-side guard: if the incoming JSON message appears to be a YouTube/video request,
+        // perform intent analysis and a YouTube search and return the video info directly instead
+        // of forwarding to n8n. This ensures clients or other producers that post to the webhook
+        // will get a clear video response and we avoid forwarding video queries to workflows.
+        try {
+          if (firstItem.json && typeof firstItem.json.message === 'string' && analyzeText) {
+            const { analyzeVideoIntent } = await import('./youtube_intent');
+            try {
+              const intent = await analyzeVideoIntent(firstItem.json.message);
+              if (intent.isVideoRequest && intent.confidence > 0.7) {
+                const searchQuery = intent.searchQuery || firstItem.json.message;
+                const YT_KEY = process.env.YOUTUBE_API_KEY;
+                if (!YT_KEY) {
+                  return res.status(500).json({ status: 'error', error: 'YOUTUBE_API_KEY not configured on server' });
+                }
+                const params = new URLSearchParams({ part: 'snippet', q: searchQuery, type: 'video', maxResults: '1', key: YT_KEY });
+                const ytResp = await fetch(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
+                if (!ytResp.ok) {
+                  const txt = await ytResp.text().catch(() => '');
+                  return res.status(502).json({ status: 'error', error: `YouTube API error ${ytResp.status}: ${txt}` });
+                }
+                const ytData = await ytResp.json();
+                const item = Array.isArray(ytData.items) && ytData.items[0];
+                if (!item) return res.json({ status: 'success', handled: 'youtube', video: null });
+                const vid = item.id?.videoId;
+                const snippet = item.snippet || {};
+                const video = {
+                  video_id: vid,
+                  title: snippet.title,
+                  description: snippet.description,
+                  channel: snippet.channelTitle,
+                  thumbnail: snippet.thumbnails?.default?.url,
+                  url: vid ? `https://www.youtube.com/watch?v=${vid}` : null,
+                };
+                return res.json({ status: 'success', handled: 'youtube', video });
+              }
+            } catch (e) {
+              console.warn('Video intent analysis in webhook guard failed', e);
+            }
+          }
+        } catch (e) {
+          console.warn('Webhook proxy youtube guard error', e);
+        }
+        
+        if (firstItem.binary) {
+          // Process each attachment
+          for (const [key, value] of Object.entries(firstItem.binary)) {
+            const binary = value as { mimeType: string; data: string };
+            
+            if (binary.mimeType.startsWith('image/') && analyzeImage) {
+              try {
+                // Reconstruct data URL
+                const dataUrl = `data:${binary.mimeType};base64,${binary.data}`;
+                const userMessage = firstItem.json?.message || '';
+                const prompt = userMessage 
+                  ? `Analyze this image based on the following request: ${userMessage}`
+                  : 'Describe this image in detail';
+                const result = await analyzeImage(dataUrl, prompt);
+                analysisResult = result;
+                break; // Only analyze the first image for now
+              } catch (e) {
+                console.error('Image analysis failed:', e);
+              }
+            } else if (firstItem.json?.url && analyzeText) {
+              try {
+                // Scrape the webpage
+                const scrapedContent = await scrapeWebpage(firstItem.json.url);
+                const userMessage = firstItem.json?.message || '';
+                const prompt = userMessage 
+                  ? `${userMessage}\n\nWebpage content from ${firstItem.json.url}:\n`
+                  : `Analyze and summarize this webpage content from ${firstItem.json.url}:\n`;
+                const result = await analyzeText(scrapedContent, prompt);
+                analysisResult = result;
+              } catch (e) {
+                console.error('URL analysis failed:', e);
+                throw new Error('Failed to analyze URL content');
+              }
+            } else if (binary.mimeType === 'application/pdf') {
+              try {
+                // Convert base64 to buffer
+                const pdfBuffer = Buffer.from(binary.data, 'base64');
+                const fileName = (value as any).fileName || 'document.pdf';
+                const userId = firstItem.json?.userId || 'anonymous';
+
+                // Get user's query from message (what they want done with the PDF)
+                const userQuery = firstItem.json?.message || 'Please summarize this document';
+
+                // Process and store PDF in vector database (create embeddings)
+                await processPDFDocument(pdfBuffer, userId, fileName);
+
+                // After embeddings are created, notify the configured n8n webhook with a minimal payload
+                if (webhookUrl) {
+                  try {
+                    // Get user info from auth token if available
+                    let username = 'anonymous';
+                    try {
+                      if (firstItem.json?.uid) {
+                        const userRecord = await admin.auth().getUser(firstItem.json.uid);
+                        username = userRecord.displayName || userRecord.email || 'anonymous';
+                      }
+                    } catch (e) {
+                      console.warn('Failed to get username:', e);
+                    }
+                    const webhookPayload = { 
+                      pdf: true, 
+                      userId, 
+                      username, 
+                      fileName, 
+                      message: userQuery 
+                    };
+                    const webhookResp = await fetch(webhookUrl, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(webhookPayload),
+                    });
+
+                    const webhookText = await webhookResp.text();
+                    let webhookJson: any = null;
+                    try { webhookJson = webhookText ? JSON.parse(webhookText) : null; } catch (e) { webhookJson = webhookText; }
+
+                    // Prefer a human-readable field if present, otherwise stringify the webhook response
+                    if (webhookJson && typeof webhookJson === 'object') {
+                      analysisResult = String(webhookJson.output ?? webhookJson.message ?? JSON.stringify(webhookJson));
+                    } else {
+                      analysisResult = String(webhookJson ?? webhookText ?? '');
+                    }
+
+                    // If webhook responded with something useful, return it immediately
+                    if (analysisResult && analysisResult.trim()) {
+                      break;
+                    }
+                    // otherwise fallthrough to local query
+                  } catch (e) {
+                    console.error('Failed to call n8n webhook after PDF embeddings:', e);
+                    // continue to local query fallback
+                  }
+                }
+
+                // Fallback: query the processed document locally and return matches
+                const queryResults = await queryDocument(userId, userQuery);
+                analysisResult = JSON.stringify({ pdf: true, query: userQuery, results: queryResults });
+                break;
+              } catch (e) {
+                console.error('PDF processing failed:', e);
+                try {
+                  console.error('Embedding provider:', process.env.EMBEDDING_PROVIDER, 'EMBEDDING_DIM:', process.env.EMBEDDING_DIM, 'GOOGLE_EMBEDDING_MODEL:', process.env.GOOGLE_EMBEDDING_MODEL);
+                } catch (err) {
+                  // ignore
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // If we have analysis results, send those directly
+      if (analysisResult) {
+        return res.json({ output: analysisResult });
+      }
+
+      // Decide how to forward to n8n. By default forward the items array.
+      // But if the client intentionally sent an investigateMode payload (URL mode)
+      // forward the raw JSON object so workflows expecting that exact shape receive it.
+      let payloadForN8n: any = itemsToSend;
+      try {
+        if (Array.isArray(itemsToSend) && itemsToSend.length === 1 && itemsToSend[0] && itemsToSend[0].json) {
+          const j = itemsToSend[0].json as any;
+          if (j.investigateMode === true && j.investigateType === 'url') {
+            // forward raw JSON payload for URL investigate flows
+            payloadForN8n = j;
+          }
+        }
+      } catch (e) {
+        // ignore and fall back to default
+      }
 
       const forwarded = await fetch(webhookUrl, {
         method: 'POST',
@@ -225,6 +421,78 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (err: any) {
       console.error('Failed to forward to n8n webhook (proxy):', err);
       res.status(502).json({ message: 'Failed to forward to n8n webhook', error: String(err) });
+    }
+  });
+
+  // Analyze message for video intent and search YouTube if appropriate
+  app.post('/api/youtube/open', verifyFirebaseToken, async (req, res) => {
+    try {
+      const { query } = req.body || {};
+      if (!query || typeof query !== 'string' || !query.trim()) {
+        return res.status(400).json({ status: 'error', error: 'query required' });
+      }
+
+      // First analyze intent using Gemini
+      const { analyzeVideoIntent } = await import('./youtube_intent');
+      const intent = await analyzeVideoIntent(query);
+
+      // If not a video request with high confidence, return early
+      if (!intent.isVideoRequest || intent.confidence < 0.7) {
+        return res.json({
+          status: 'success',
+          isVideoRequest: false,
+          confidence: intent.confidence,
+          video: null
+        });
+      }
+
+      // We have a video request - search YouTube with the extracted query
+      const searchQuery = intent.searchQuery || query;
+      const YT_KEY = process.env.YOUTUBE_API_KEY;
+      if (!YT_KEY) {
+        return res.status(500).json({ status: 'error', error: 'YOUTUBE_API_KEY not configured on server' });
+      }
+
+      const params = new URLSearchParams({
+        part: 'snippet',
+        q: searchQuery,
+        type: 'video',
+        maxResults: '1',
+        key: YT_KEY,
+      });
+
+      const resp = await fetch(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
+      if (!resp.ok) {
+        const txt = await resp.text().catch(() => '');
+        return res.status(502).json({ status: 'error', error: `YouTube API error ${resp.status}: ${txt}` });
+      }
+
+      const data = await resp.json();
+      const item = Array.isArray(data.items) && data.items[0];
+      if (!item) return res.status(404).json({ status: 'error', error: 'No videos found' });
+
+      const vid = item.id?.videoId;
+      const snippet = item.snippet || {};
+      const video = {
+        video_id: vid,
+        title: snippet.title,
+        description: snippet.description,
+        channel: snippet.channelTitle,
+        thumbnail: snippet.thumbnails?.default?.url,
+        url: vid ? `https://www.youtube.com/watch?v=${vid}` : null,
+      };
+
+      return res.json({
+        status: 'success',
+        isVideoRequest: true,
+        confidence: intent.confidence,
+        video,
+        originalQuery: query,
+        searchQuery
+      });
+    } catch (err: any) {
+      console.error('POST /api/youtube/open error', err);
+      return res.status(500).json({ status: 'error', error: String(err) });
     }
   });
 

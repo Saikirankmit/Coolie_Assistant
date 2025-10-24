@@ -2,7 +2,7 @@ import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Calendar, Mail, MessageCircle, AlertCircle, MoreVertical, Trash2 } from "lucide-react";
+import { Calendar, Mail, MessageCircle, AlertCircle, MoreVertical, Trash2, Play } from "lucide-react";
 import type { Task } from "@shared/schema";
 import { cn } from "@/lib/utils";
 import {
@@ -22,12 +22,14 @@ const typeIcons = {
   gmail: Mail,
   whatsapp: MessageCircle,
   reminder: AlertCircle,
+  youtube: Play,
 };
 
 const typeColors = {
   gmail: "from-chart-1/20 to-chart-2/20",
   whatsapp: "from-chart-3/20 to-chart-4/20",
   reminder: "from-chart-4/20 to-chart-5/20",
+  youtube: "from-red-500/10 to-red-600/10",
 };
 
 const priorityColors = {

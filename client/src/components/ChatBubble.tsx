@@ -69,9 +69,9 @@ export function ChatBubble({ message, userName, userAvatar }: ChatBubbleProps) {
             <div className="absolute inset-0 bg-gradient-to-br from-chart-2/5 to-primary/5 opacity-50" />
           )}
           <div className="relative z-10">
-            <p className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">
-              {message.content}
-            </p>
+            <div className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">
+                {renderMessageContent(message.content)}
+              </div>
             {message.attachments && message.attachments.length > 0 && (
               <div className="mt-3 grid grid-cols-1 gap-2">
                 {message.attachments.map((a, i) => (
@@ -100,5 +100,30 @@ export function ChatBubble({ message, userName, userAvatar }: ChatBubbleProps) {
         </div>
       </div>
     </div>
+  );
+}
+
+function renderMessageContent(content: string | undefined | null) {
+  if (!content) return null;
+
+  // simple URL regex
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
+  const parts = content.split(urlRegex);
+
+  return (
+    <>
+      {parts.map((part, i) => {
+        if (urlRegex.test(part)) {
+          // reset lastIndex in case of global regex reuse
+          urlRegex.lastIndex = 0;
+          return (
+            <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="text-sm underline text-primary">
+              {part}
+            </a>
+          );
+        }
+        return <span key={i}>{part}</span>;
+      })}
+    </>
   );
 }

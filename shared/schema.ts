@@ -32,7 +32,8 @@ export type Task = {
   id: string;
   title: string;
   description?: string;
-  type: "gmail" | "whatsapp" | "reminder";
+  // include youtube as a client-visible task type
+  type: "gmail" | "whatsapp" | "reminder" | "youtube";
   priority: "low" | "medium" | "high";
   completed: boolean;
   dueDate?: Date;
