@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { useToast } from '../hooks/use-toast';
+import { apiFetch } from '../lib/api';
 
 export function WebsiteOpener() {
   const [website, setWebsite] = useState('');
@@ -11,7 +12,7 @@ export function WebsiteOpener() {
   const handleOpenWebsite = async () => {
     try {
       setLoading(true);
-      const response = await fetch('/api/website/open', {
+      const response = await apiFetch('/api/website/open', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'

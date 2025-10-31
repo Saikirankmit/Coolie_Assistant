@@ -7,6 +7,7 @@ import { useChat } from "@/contexts/ChatContext";
 import { Button } from "@/components/ui/button";
 import { Trash2, Sparkles, PlusCircle, Archive, Search, MessageSquare, Link } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { apiFetch } from "@/lib/api";
 
 const WEBHOOK_URL = import.meta.env.VITE_CLIENT_WEBHOOK_URL || "/api/webhook/proxy";
 
@@ -278,7 +279,7 @@ export default function Chat() {
       let handled = false;
       if (shouldTrySiteQuickPath) {
         try {
-          const siteResp = await fetch('/api/website/open', {
+          const siteResp = await apiFetch('/api/website/open', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ query: messageText }),
