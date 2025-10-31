@@ -41,13 +41,27 @@ export default function Tasks() {
 
     console.log('User authenticated, fetching reminders for:', user.uid);
     setLoading(true);
+    const cacheKey = `cached_reminders_${user.uid}`;
+    // Migrate legacy global cache to per-user cache and clear legacy to avoid cross-user leakage
+    try {
+      const legacy = localStorage.getItem('cached_reminders');
+      const existingPerUser = localStorage.getItem(cacheKey);
+      if (legacy && !existingPerUser) {
+        localStorage.setItem(cacheKey, legacy);
+      }
+      if (legacy) {
+        localStorage.removeItem('cached_reminders');
+      }
+    } catch (e) {
+      // ignore storage errors
+    }
     
     // fetch reminders
     (async () => {
       try {
-        // hydrate from cache first
+        // hydrate from cache first (per-user)
         try {
-          const cached = localStorage.getItem('cached_reminders');
+          const cached = localStorage.getItem(cacheKey);
           console.log('Raw cached data from localStorage:', cached);
           if (cached) {
             const parsed = JSON.parse(cached) as any[];
@@ -136,8 +150,8 @@ export default function Tasks() {
         console.log('Setting tasks count:', final.length);
         setTasks(final);
         try {
-          localStorage.setItem('cached_reminders', JSON.stringify(rows));
-          console.log('Cached reminders to localStorage');
+          localStorage.setItem(cacheKey, JSON.stringify(rows));
+          console.log('Cached reminders to localStorage (per-user)');
         } catch (e) {
           console.warn('Failed to cache reminders', e);
         }
