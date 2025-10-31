@@ -247,8 +247,87 @@ export default function Chat() {
       if ((now - sentAt) > twoMinutes) {
         console.debug('Message too old to send to webhook (skipping)', { now, sentAt });
       } else {
-      // If we built a prebuiltPayload (URL investigate) use it directly and send as JSON
-      if (prebuiltPayload) {
+      // QUICK-PATH: try website opener before sending to external webhook.
+      // This mirrors the YouTube quick-path above and prevents general messages
+      // like "open amazon" from being forwarded to n8n.
+      let handled = false;
+      try {
+        const siteResp = await fetch('/api/website/open', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: messageText }),
+        });
+        if (siteResp.ok) {
+          const siteJson = await siteResp.json();
+          // If we get any indication of success from the website endpoint, don't forward to webhook
+          const success = siteJson?.status === 'success' || 
+                         siteJson?.opened_in_system_browser || 
+                         siteJson?.opened ||
+                         siteJson?.final_url ||
+                         siteJson?.data?.screenshot_url;
+          
+          if (success) {
+            handled = true;
+            // If the server returned a final URL, open it in the user's browser (client-side)
+            if (siteJson?.final_url) {
+              try {
+                const w = window.open(siteJson.final_url, '_blank', 'noopener,noreferrer');
+                if (w) try { w.focus(); } catch (e) { /* ignore */ }
+              } catch (e) {
+                console.warn('window.open failed for site quick-path', e);
+              }
+              const assistantMsg = {
+                id: (Date.now() + 1).toString(),
+                content: `🌐 I found the website you're looking for!\n\n${
+                  siteJson?.data?.title 
+                    ? `Title: ${siteJson.data.title}\n` 
+                    : `URL: ${new URL(siteJson.final_url).hostname}\n`
+                }${
+                  siteJson?.data?.description 
+                    ? `Description: ${siteJson.data.description}\n` 
+                    : ''
+                }\nI've opened it in a new tab for you${siteJson.final_url !== siteJson.url ? ` (redirected to: ${siteJson.final_url})` : ''}.`,
+                role: 'assistant' as const,
+                timestamp: new Date(),
+              };
+              addMessage(assistantMsg);
+              setIsTyping(false);
+              return; // handled — don't forward to webhook
+            }
+            // If the tool returned a screenshot URL, show a message with link
+            if (siteJson?.data?.screenshot_url) {
+              const assistantMsg = {
+                id: (Date.now() + 1).toString(),
+                content: `🌐 I found and captured the website for you!\n\n${
+                  siteJson?.data?.title 
+                    ? `Title: ${siteJson.data.title}\n` 
+                    : ''
+                }${
+                  siteJson?.data?.description 
+                    ? `Description: ${siteJson.data.description}\n` 
+                    : ''
+                }\nHere's a screenshot of the page: ${siteJson.data.screenshot_url}`,
+                role: 'assistant' as const,
+                timestamp: new Date(),
+              };
+              addMessage(assistantMsg);
+              setIsTyping(false);
+              return; // handled
+            }
+          }
+        }
+      } catch (e) {
+        // ignore and fall back to webhook forwarding
+        console.warn('Website quick-path failed:', e);
+      }
+
+      // Don't proceed with webhook if website was handled successfully
+      if (handled) {
+        setIsTyping(false);
+        return;
+      }
+        // If we built a prebuiltPayload (URL investigate) use it directly and send as JSON
+        if (prebuiltPayload) {
         console.debug("Sending prebuilt JSON webhook POST to", WEBHOOK_URL, "payload:", prebuiltPayload);
         response = await fetch(WEBHOOK_URL, {
           method: "POST",

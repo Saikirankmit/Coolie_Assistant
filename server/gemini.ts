@@ -4,16 +4,25 @@ const MODEL_NAME = 'gemini-2.0-flash';
 const API_KEY = process.env.GOOGLE_AI_API_KEY;
 
 if (!API_KEY) {
-  console.warn('GOOGLE_AI_API_KEY not configured - Gemini analysis will not work');
+  console.warn('GOOGLE_AI_API_KEY not configured - Gemini analysis may not work');
+}
+
+function createModelForKey(key: string) {
+  const genAI = new GoogleGenerativeAI(key);
+  return genAI.getGenerativeModel({ model: MODEL_NAME });
 }
 
 export async function analyzeText(text: string, prompt?: string): Promise<string> {
   if (!API_KEY) {
     throw new Error('GOOGLE_AI_API_KEY not configured');
   }
+  return analyzeTextWithKey(text, prompt, API_KEY);
+}
 
-  const genAI = new GoogleGenerativeAI(API_KEY);
-  const model = genAI.getGenerativeModel({ model: MODEL_NAME });
+export async function analyzeTextWithKey(text: string, prompt: string | undefined, apiKey: string): Promise<string> {
+  if (!apiKey) throw new Error('apiKey required');
+
+  const model = createModelForKey(apiKey);
 
   const generationConfig = {
     temperature: 0.4,
@@ -22,9 +31,7 @@ export async function analyzeText(text: string, prompt?: string): Promise<string
     maxOutputTokens: 2048,
   } as any;
 
-  const fullPrompt = prompt 
-    ? `${prompt}\n\nContent:\n${text}`
-    : text;
+  const fullPrompt = prompt ? `${prompt}\n\nContent:\n${text}` : text;
 
   try {
     const result = await model.generateContent(fullPrompt, generationConfig);
@@ -32,7 +39,7 @@ export async function analyzeText(text: string, prompt?: string): Promise<string
     return response.text();
   } catch (error: any) {
     console.error('Gemini text analysis error:', error);
-    throw new Error(`Text analysis failed: ${error.message}`);
+    throw new Error(`Text analysis failed: ${error?.message ?? String(error)}`);
   }
 }
 
@@ -41,8 +48,7 @@ export async function analyzeImage(base64Image: string, prompt: string = 'Descri
     throw new Error('GOOGLE_AI_API_KEY not configured');
   }
 
-  const genAI = new GoogleGenerativeAI(API_KEY);
-  const model = genAI.getGenerativeModel({ model: MODEL_NAME });
+  const model = createModelForKey(API_KEY);
 
   // Extract mime type and actual base64 from the data URL
   const matches = base64Image.match(/^data:([^;]+);base64,(.+)$/);
@@ -52,7 +58,6 @@ export async function analyzeImage(base64Image: string, prompt: string = 'Descri
 
   const [_, mimeType, base64Data] = matches;
 
-  // Create the image part for the model
   const imagePart = {
     inlineData: {
       data: base64Data,
@@ -60,7 +65,6 @@ export async function analyzeImage(base64Image: string, prompt: string = 'Descri
     }
   };
 
-  // Configuration for generation
   const generationConfig = {
     temperature: 0.4,
     topK: 32,
@@ -74,6 +78,6 @@ export async function analyzeImage(base64Image: string, prompt: string = 'Descri
     return response.text();
   } catch (error: any) {
     console.error('Gemini image analysis error:', error);
-    throw new Error(`Image analysis failed: ${error.message}`);
+    throw new Error(`Image analysis failed: ${error?.message ?? String(error)}`);
   }
 }

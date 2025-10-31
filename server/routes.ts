@@ -85,6 +85,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   } catch (e) {
     console.warn('Failed to import Gemini integration:', e);
   }
+
+  // Import Website routes
+  try {
+    const websiteRoutes = (await import('./routes/website')).default;
+    app.use('/api/website', websiteRoutes);
+  } catch (e) {
+    console.warn('Failed to register website routes:', e);
+  }
   
   // Import scraper utility
   const { scrapeWebpage } = await import('./lib/scraper');

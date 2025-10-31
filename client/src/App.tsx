@@ -17,6 +17,7 @@ import Chat from "@/pages/Chat";
 import Tasks from "@/pages/Tasks";
 import Personalization from "@/pages/Personalization";
 import Settings from "@/pages/Settings";
+import Website from "@/pages/Website";
 import NotFound from "@/pages/not-found";
 
 function ProtectedRoute({ component: Component }: { component: React.ComponentType }) {
@@ -55,6 +56,9 @@ function Router() {
       </Route>
       <Route path="/settings">
         <ProtectedRoute component={Settings} />
+      </Route>
+      <Route path="/website">
+        <ProtectedRoute component={Website} />
       </Route>
       <Route component={NotFound} />
     </Switch>

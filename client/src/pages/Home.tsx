@@ -26,6 +26,18 @@ export default function Home() {
       iconBg: "bg-gradient-to-br from-chart-3/20 to-chart-4/20",
       iconColor: "text-chart-3",
     },
+    {
+      title: "Browse Website",
+      description: "Open and browse any website",
+      icon: () => <svg className="h-7 w-7" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM12 20C7.58 20 4 16.42 4 12C4 7.58 7.58 4 12 4C16.42 4 20 7.58 20 12C20 16.42 16.42 20 12 20Z" fill="currentColor"/>
+        <path d="M13 7H11V13H17V11H13V7ZM12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM12 20C7.58 20 4 16.42 4 12C4 7.58 7.58 4 12 4C16.42 4 20 7.58 20 12C20 16.42 16.42 20 12 20Z" fill="currentColor"/>
+      </svg>,
+      href: "/website",
+      gradient: "from-chart-2 to-chart-4",
+      iconBg: "bg-gradient-to-br from-chart-2/20 to-chart-4/20",
+      iconColor: "text-chart-2",
+    },
   ];
 
   const features = [
