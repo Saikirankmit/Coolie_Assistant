@@ -36,6 +36,20 @@ const WEB_NAVIGATE_TOOL = {
 };
 
 export async function handleWebNavigateRequest(input: WebNavigateToolInput) {
+  // Allow disabling Playwright-driven automation in constrained environments (e.g., Render free plan)
+  // When disabled, we short-circuit and return a minimal success response so the client can open the URL directly.
+  const disable = (process.env.PLAYWRIGHT_DISABLED || '').toLowerCase();
+  if (disable === '1' || disable === 'true' || disable === 'yes') {
+    return {
+      tool: 'playwright_navigate',
+      url: input.url,
+      action: input.action || 'screenshot',
+      data: undefined,
+      final_url: input.url,
+      opened_in_system_browser: false,
+      status: 'success'
+    } as NavigationResult;
+  }
   // Block certain domains
   const lowerUrl = input.url.toLowerCase();
   if (lowerUrl.includes('youtube.com') || lowerUrl.includes('youtu.be') || lowerUrl.includes('gmail.com')) {

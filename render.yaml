@@ -11,6 +11,8 @@ services:
         value: production
       - key: PORT
         value: 10000
+      - key: PLAYWRIGHT_DISABLED
+        value: "1"
       - key: FRONTEND_URL
         fromService:
           type: static_site

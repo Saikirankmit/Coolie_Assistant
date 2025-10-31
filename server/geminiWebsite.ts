@@ -34,8 +34,8 @@ export async function handleWebsiteRequest(userRequest: string) {
       url: parsed.url,
       clickText: parsed.clickText ?? parsed.click_text ?? null,
       action: parsed.action ?? 'screenshot',
-      // For chat quick-path assume user wants to open the site in their browser
-      openInBrowser: parsed.openInBrowser ?? parsed.open_in_browser ?? true,
+      // Never attempt to open a system browser from the server in production
+      openInBrowser: false,
     } as any;
 
     return await handleWebNavigateRequest(args);
