@@ -45,10 +45,6 @@ export async function openWebsiteAndNavigate(
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-    // Get page title and description
-    const title = await page.title();
-    const description = await page.$eval('meta[name="description"]', (el) => el.getAttribute('content')).catch(() => undefined);
-
     // Handle click text if provided
     let clickInfo: { clicked: boolean; strategy?: string | null; details?: any; error?: string | null } | null = null;
     if (clickText) {
@@ -142,11 +138,7 @@ export async function openWebsiteAndNavigate(
       tool: 'playwright_navigate',
       url,
       action,
-      data: {
-        ...resultData,
-        title: await page.title(),
-        description: await page.$eval('meta[name="description"]', (el) => el.getAttribute('content')).catch(() => ''),
-      },
+      data: resultData,
       final_url: finalUrl,
       opened_in_system_browser: opened,
       open_error: openError,

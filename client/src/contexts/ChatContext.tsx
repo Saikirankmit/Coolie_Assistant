@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { ChatMessage } from "@shared/schema";
+import { useAuth } from "./AuthContext";
 
 type Conversation = {
   id: string;
@@ -29,18 +30,18 @@ const ChatContext = createContext<ChatContextType | undefined>(undefined);
 
 const STORAGE_PREFIX = "coolie:conversations";
 
-function storageKeyForUser(): string {
+function storageKeyFor(uid?: string | null) {
   try {
-    const uid = localStorage.getItem("userId") || "guest";
-    return `${STORAGE_PREFIX}:${uid}`;
+    const id = uid || localStorage.getItem("userId") || "guest";
+    return `${STORAGE_PREFIX}:${id}`;
   } catch (e) {
     return `${STORAGE_PREFIX}:guest`;
   }
 }
 
-function loadFromStorage(): Conversation[] {
+function loadFromStorageFor(uid?: string | null): Conversation[] {
   try {
-    const raw = localStorage.getItem(storageKeyForUser());
+    const raw = localStorage.getItem(storageKeyFor(uid));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as Conversation[];
     return parsed.map((c) => ({ ...c }));
@@ -50,27 +51,71 @@ function loadFromStorage(): Conversation[] {
   }
 }
 
-function saveToStorage(conversations: Conversation[]) {
+// Fallback loader: scan localStorage for any matching conversation keys and return the first non-empty
+function scanAnyStoredConversations(): Conversation[] {
   try {
-    localStorage.setItem(storageKeyForUser(), JSON.stringify(conversations));
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(STORAGE_PREFIX + ':')) keys.push(k);
+    }
+    // try keys in insertion order; prefer the last one set by iterating reverse
+    for (let i = keys.length - 1; i >= 0; i--) {
+      const raw = localStorage.getItem(keys[i]);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw) as Conversation[];
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed.map((c) => ({ ...c }));
+      } catch (e) {
+        // ignore parse errors and continue
+        continue;
+      }
+    }
+    return [];
+  } catch (e) {
+    console.warn('Failed to scan localStorage for conversations', e);
+    return [];
+  }
+}
+
+function saveToStorageFor(uid: string | null | undefined, conversations: Conversation[]) {
+  try {
+    localStorage.setItem(storageKeyFor(uid), JSON.stringify(conversations));
   } catch (e) {
     console.warn("Failed to save conversations to storage:", e);
   }
 }
 
 export function ChatProvider({ children }: { children: React.ReactNode }) {
-  const [conversations, setConversations] = useState<Conversation[]>(() => loadFromStorage());
-  const [currentConversationId, setCurrentConversationId] = useState<string | null>(() => {
-    const convs = loadFromStorage();
-    return convs.length ? convs[convs.length - 1].id : null;
-  });
+  const { user } = useAuth();
+
+  // start empty; we'll load from storage after auth state is known to avoid guest/uid race
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
 
   const [isTyping, setIsTyping] = useState(false);
 
-  // persist when conversations change
+  // Load conversations for the current user when user changes (or on mount for guest)
   useEffect(() => {
-    saveToStorage(conversations);
-  }, [conversations]);
+    try {
+      let loaded = loadFromStorageFor(user?.uid ?? null);
+      if ((!loaded || loaded.length === 0) && !user?.uid) {
+        // if no user and nothing found, try scanning any stored conversations (fallback)
+        loaded = scanAnyStoredConversations();
+      }
+      console.debug('ChatProvider: initializing conversations for user', user?.uid ?? 'none', 'loadedCount', loaded.length);
+      setConversations(loaded);
+      setCurrentConversationId(loaded.length ? loaded[loaded.length - 1].id : null);
+    } catch (e) {
+      console.warn('Failed to initialize conversations from storage', e);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.uid]);
+
+  // persist when conversations or user changes
+  useEffect(() => {
+    saveToStorageFor(user?.uid ?? null, conversations);
+  }, [conversations, user?.uid]);
 
   const newConversation = (title?: string) => {
     const id = (typeof crypto !== 'undefined' && (crypto as any).randomUUID ? (crypto as any).randomUUID() : `${Date.now()}`);
