@@ -32,7 +32,8 @@ const STORAGE_PREFIX = "coolie:conversations";
 
 function storageKeyFor(uid?: string | null) {
   try {
-    const id = uid || localStorage.getItem("userId") || "guest";
+    // Only trust the explicit uid from AuthContext. When not authenticated, always use 'guest'.
+    const id = uid || "guest";
     return `${STORAGE_PREFIX}:${id}`;
   } catch (e) {
     return `${STORAGE_PREFIX}:guest`;
@@ -98,6 +99,22 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // Load conversations for the current user when user changes (or on mount for guest)
   useEffect(() => {
     try {
+      // If a user just logged in, migrate any guest conversations to this user's key
+      if (user?.uid) {
+        try {
+          const userKey = `${STORAGE_PREFIX}:${user.uid}`;
+          const guestKey = `${STORAGE_PREFIX}:guest`;
+          const hasUser = localStorage.getItem(userKey);
+          const hasGuest = localStorage.getItem(guestKey);
+          if (!hasUser && hasGuest) {
+            localStorage.setItem(userKey, hasGuest);
+            localStorage.removeItem(guestKey);
+          }
+        } catch (e) {
+          // ignore storage errors
+        }
+      }
+
       let loaded = loadFromStorageFor(user?.uid ?? null);
       if ((!loaded || loaded.length === 0) && !user?.uid) {
         // if no user and nothing found, try scanning any stored conversations (fallback)

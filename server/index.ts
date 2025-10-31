@@ -149,6 +149,18 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: false, limit: '50mb' }));
 
+// Serve runtime-generated static assets (e.g., Playwright screenshots) from /static
+// These are written under process.cwd()/static by playwrightHelper
+try {
+  const runtimeStaticDir = path.resolve(process.cwd(), 'static');
+  if (!fs.existsSync(runtimeStaticDir)) {
+    fs.mkdirSync(runtimeStaticDir, { recursive: true });
+  }
+  app.use('/static', express.static(runtimeStaticDir));
+} catch (e) {
+  console.warn('Failed to initialize /static directory', e);
+}
+
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
